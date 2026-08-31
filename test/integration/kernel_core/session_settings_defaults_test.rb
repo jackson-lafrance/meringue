@@ -167,6 +167,11 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     assert_accepted(thinking_result)
     assert_equal "future_pi_sessions", thinking_result.dig("result", "scope")
     assert_equal ["P1-I1-W1"], model_result.dig("result", "existing_session_ids_unchanged")
+    assert_includes model_result.fetch("message"), "Existing sessions were not changed."
+    refute_includes model_result.fetch("message"), "Existing sessions were not changed:"
+    assert_equal ["P1-I1-W1"], thinking_result.dig("result", "existing_session_ids_unchanged")
+    assert_includes thinking_result.fetch("message"), "Existing sessions were not changed."
+    refute_includes thinking_result.fetch("message"), "Existing sessions were not changed:"
     assert_equal first_before, persisted_agents.fetch(0).fetch("session_settings")
     config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
     assert_equal "openai/gpt-5.6-sol", config.value("harness", "head_model")
@@ -178,7 +183,8 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     second = persisted_agents.find { |agent| agent.fetch("id") == "P1-I1-W2" }
     assert_equal "openai/gpt-5.6-sol", second.dig("session_settings", "model", "reference")
     assert_equal "xhigh", second.dig("session_settings", "thinking_level")
-    assert_includes log_messages.last(4).join("\n"), "Existing sessions were not changed"
+    assert_includes log_messages.last(4).join("\n"), "Existing sessions were not changed."
+    refute_includes log_messages.last(4).join("\n"), "Existing sessions were not changed:"
   end
 
   def test_role_specific_commands_persist_independent_defaults_and_scope_their_results
@@ -189,6 +195,8 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     assert_accepted(worker_result)
     assert_equal "future_pi_head_sessions", head_result.dig("result", "scope")
     assert_equal "future_pi_worker_sessions", worker_result.dig("result", "scope")
+    assert_match(/for future heads\. Existing sessions were not changed\./, head_result.fetch("message"))
+    assert_match(/for future workers\. Existing sessions were not changed\./, worker_result.fetch("message"))
     assert_equal "low", worker_result.dig("result", "roles", "head", "thinking_level")
     assert_equal "xhigh", worker_result.dig("result", "roles", "worker", "thinking_level")
 
@@ -222,8 +230,8 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     assert_equal "future_pi_worker_sessions", worker_result.dig("result", "scope")
     assert_equal "openai/gpt-5.6-sol", worker_result.dig("result", "roles", "head", "model")
     assert_equal "anthropic/claude-opus-5", worker_result.dig("result", "roles", "worker", "model")
-    assert_match(/for future heads\./, head_result.fetch("message"))
-    assert_match(/for future workers\./, worker_result.fetch("message"))
+    assert_match(/for future heads\. Existing sessions were not changed\./, head_result.fetch("message"))
+    assert_match(/for future workers\. Existing sessions were not changed\./, worker_result.fetch("message"))
 
     config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
     assert_equal "openai/gpt-5.6-sol", config.value("harness", "head_model")
