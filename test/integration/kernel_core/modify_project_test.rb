@@ -49,6 +49,38 @@ class KernelCoreModifyProjectTest < Minitest::Test
     assert_equal "World", persisted_project("P1").fetch("name")
   end
 
+  # Regression: renaming a project to the name it already has logged
+  # "Renamed project P1: Meringue -> Meringue", which reads as a rename that silently
+  # failed. It has to report the no-op honestly and leave the record alone.
+  def test_modify_project_reports_a_rename_to_the_current_name_as_no_change
+    apply_command("ModifyProject", "project_id" => "P1", "name" => "Meringue")
+    before = persisted_project("P1")
+
+    result = apply_command("ModifyProject", "project_id" => "P1", "name" => "  Meringue  ")
+
+    assert_accepted(result)
+    assert_equal "P1", result.fetch("target_id")
+    assert_equal "Project P1 is already named Meringue; nothing was changed.", result.fetch("message")
+    assert_equal before, persisted_project("P1"), "a no-op rename leaves the record, including updated_at, untouched"
+
+    entry = log_entry(result.fetch("log_entry_ids").first)
+    assert_equal "Project P1 is already named Meringue; nothing was changed.", entry.fetch("message")
+    assert_equal [], entry.fetch("details").fetch("changed_fields")
+    refute_includes entry.fetch("message"), "->"
+  end
+
+  # Only an identical name is a no-op. Changing the case is a real rename, even though the
+  # two names collide for the uniqueness check.
+  def test_modify_project_still_renames_when_only_the_case_differs
+    apply_command("ModifyProject", "project_id" => "P1", "name" => "meringue")
+
+    result = apply_command("ModifyProject", "project_id" => "P1", "name" => "Meringue")
+
+    assert_accepted(result)
+    assert_equal "Meringue", persisted_project("P1").fetch("name")
+    assert_equal "Renamed project P1: meringue -> Meringue", log_entry(result.fetch("log_entry_ids").first).fetch("message")
+  end
+
   # ModifyProject also accepts the generic target_id spelling, which is what the removed
   # Rename wrapper used to forward.
   def test_modify_project_accepts_a_generic_target_id

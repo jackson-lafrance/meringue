@@ -48,7 +48,6 @@ class TuiAgentTreePaneTest < Minitest::Test
 
     rendered = plain_lines(@pane.lines(state, width: 40))
 
-    # The isolation chip is part of the row; the lifecycle status never is.
     assert_project_row(rendered, "● P1  Meringue")
     assert_project_row(rendered, "· P2  World")
     Pane::STATUS_DOTS.each_key do |status|
@@ -82,8 +81,53 @@ class TuiAgentTreePaneTest < Minitest::Test
     assert_project_row(plain_lines(@pane.lines(state, width: 40)), "● P1  Working Copy")
   end
 
-  # A project row is the dot, the id, the product name, and the isolation chip. Matching
-  # on the prefix keeps these about the name without restating the chip in every case.
+  # Regression: the isolation evidence was concatenated onto the project name, so a
+  # healthy project read "● P1  Meringue ✓ isolated" and the badge was indistinguishable
+  # from the stored name. The row carries the name and nothing else; the evidence still
+  # lives on the project record for the workspace and doctor paths that act on it.
+  def test_a_project_row_never_shows_isolation_evidence
+    [
+      { "isolated_workspaces" => true, "mutable_workspace" => true },
+      { "isolated_workspaces" => false }
+    ].each do |capabilities|
+      state = tree_state(projects: [project_record("P1", "name" => "Meringue", "version_control_capabilities" => capabilities)])
+
+      row = project_row(state)
+
+      assert_equal "● P1  Meringue", plain_line(row).rstrip, "capabilities #{capabilities.inspect} must not reach the row"
+      refute_includes plain_line(row), "isolat"
+      refute_includes plain_line(row), "✓"
+    end
+  end
+
+  # A project record written before isolation evidence existed carries no capabilities at
+  # all, and must read exactly the same as one that does.
+  def test_a_project_row_reads_the_same_with_no_evidence_field_at_all
+    project = project_record("P1", "name" => "Meringue")
+    project.delete("version_control_capabilities")
+    state = tree_state(projects: [project])
+
+    assert_equal "● P1  Meringue", plain_line(project_row(state)).rstrip
+  end
+
+  # The original suspicion was that the badge had been written into the stored name.
+  # It never was: rendering the row leaves the record untouched.
+  def test_rendering_a_project_row_never_mutates_the_stored_name
+    project = project_record("P1", "name" => "Meringue")
+    state = tree_state(projects: [project])
+
+    @pane.lines(state, width: 60)
+
+    assert_equal "Meringue", project.fetch("name")
+    assert_equal "Meringue", state.fetch("projects").first.fetch("name")
+  end
+
+  def project_row(state, width: 60)
+    @pane.lines(state, width: width).find { |line| plain_line(line).include?("P1") }
+  end
+
+  # A project row is the dot, the id, and the product name. Matching on the prefix keeps
+  # these cases about the name itself.
   def assert_project_row(rendered, prefix)
     assert(
       rendered.any? { |line| line.start_with?(prefix) },

@@ -391,11 +391,14 @@ module Meringue
         # label must never read "Meringue working". A stored name that still carries a
         # status word (written by an older Meringue, or not yet re-saved after the state
         # repair) is cleaned here too, so the user never reads the polluted label.
+        #
+        # "Nothing else" includes version-control evidence: the row briefly appended
+        # "✓ isolated" / "! isolation unavailable" to the name, which read as part of the
+        # stored name. The evidence still lives on the project record and is still what
+        # gates a worker's workspace, reported by `meringue doctor` and by the workspace
+        # failure notes — the tree row is simply not where it is announced.
         def project_title(project)
-          title = ProjectNaming.without_status_suffix(project.fetch("name", nil)) || "Untitled project"
-          capabilities = project.fetch("version_control_capabilities", {})
-          isolated = capabilities["isolated_workspaces"] == true
-          "#{title}  #{isolated ? "✓ isolated" : "! isolation unavailable"}"
+          ProjectNaming.without_status_suffix(project.fetch("name", nil)) || "Untitled project"
         end
 
         def item_lines(prefix:, record:, id:, title:, suffix: "", selected: false, width: nil)
