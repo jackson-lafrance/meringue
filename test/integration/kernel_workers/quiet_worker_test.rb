@@ -54,6 +54,17 @@ class KernelWorkersQuietWorkerTest < Minitest::Test
     assert_equal recorded, last_activity_at(engine, worker_id), "the quiet warning must not move the activity clock"
   end
 
+  def test_a_second_reconciler_does_not_repeat_an_unchanged_quiet_warning
+    first_engine, worker_id = quiet_worker(seconds: THRESHOLD + 60)
+    first = apply!(first_engine, "ReconcileSessions", {})
+    second_engine = build_engine(harness_client: streaming_client)
+    second = apply!(second_engine, "ReconcileSessions", {})
+
+    assert_equal [worker_id], first.dig("result", "quiet_worker_results").map { |result| result.fetch("agent_id") }
+    assert_empty second.dig("result", "quiet_worker_results")
+    assert_equal 1, quiet_logs(second_engine).length
+  end
+
   def test_output_clears_the_warning_so_the_next_quiet_stretch_is_reported_again
     client = streaming_client
     engine, worker_id = quiet_worker(seconds: THRESHOLD + 60, client: client)

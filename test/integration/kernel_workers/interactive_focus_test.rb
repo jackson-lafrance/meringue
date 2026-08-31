@@ -296,7 +296,6 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
                     "Started queued worker #{dependent_id} on #{context.fetch("issue_id")} because #{worker_id} settled (completed)."
     refute state(engine).fetch("logs").any? { |entry| entry.fetch("message", "").include?("produced no output") }
   end
-  end
 
   def test_successful_focus_entry_and_exit_do_not_append_user_visible_handoff_logs
     client = InteractiveHarnessClient.new
