@@ -29,15 +29,18 @@ module Meringue
         return focus_result if focus_result
         return nil unless @focused_pane == "logs"
 
+        if workspace_scroll_key?(remainder) && agent_workspace_scroll_max(state).positive?
+          scroll_agent_workspace(remainder, state)
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
         if @agent_workspace_open_pending
           @agent_workspace_notice = "Focused session is still preparing. Chat and AgentTree controls remain available."
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
-        # PageUp/PageDown and every other non-leader key belong to the embedded
-        # application. In particular, do not page through Meringue's captured
-        # screen rows: that changes pixels without changing the harness's own
-        # history position.
+        # Other non-leader keys belong to the embedded application. Page keys and wheel events
+        # scroll the captured workspace transcript when it has more rows than the viewport.
         if @agent_workspace_view == "terminal"
           forward_agent_workspace_terminal_key(remainder, state)
         else
@@ -62,6 +65,11 @@ module Meringue
         return [input_buffer, input_cursor, slash_suggestion_index] if remainder.nil?
 
         key = remainder
+        if workspace_scroll_key?(key) && agent_workspace_scroll_max(state).positive?
+          scroll_agent_workspace(key, state)
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
         if @agent_workspace_interactive && @agent_workspace_view != "terminal"
           forward_agent_workspace_interactive_key(key, state)
           return [input_buffer, input_cursor, slash_suggestion_index]

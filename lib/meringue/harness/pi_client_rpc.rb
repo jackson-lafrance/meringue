@@ -39,6 +39,59 @@ module Meringue
       end
 
       private
+
+      # Native focus reopens the existing durable session without a positional message. Keeping
+      # the command free of `--mode rpc` and trailing text is what makes entry a pure attach.
+      def interactive_session_argv(session_ref)
+        session = resume_session_argument(session_ref)
+        argv = without_options(
+          Array(command).map(&:to_s),
+          "--mode", "--session", "--session-dir", "--session-id", "--name", "-n", "--append-system-prompt",
+          "--system-prompt", "--fork"
+        )
+        argv = without_flags(argv, "--no-session", "--continue", "-c", "--resume", "-r", "--print", "-p")
+        argv += ["--session-dir", File.expand_path(session_dir)] if present?(session_dir)
+        argv += ["--session", session]
+        session_name = metadata_value(session_ref, "session_name")
+        argv += ["--name", session_name.to_s] if present?(session_name)
+        session_arguments = without_options(
+          extra_args,
+          "--mode", "--session", "--session-dir", "--session-id", "--name", "-n", "--append-system-prompt",
+          "--system-prompt", "--fork", "--model", "--thinking"
+        )
+        session_arguments = without_flags(session_arguments, "--no-session", "--continue", "-c", "--resume", "-r", "--print", "-p")
+        session_arguments += session_setting_arguments(session_ref.fetch("session_settings", {}))
+        session_arguments = enforce_read_only_tools(session_arguments) if metadata_value(session_ref, "workspace_mode") == "shared_read_only"
+        argv += session_arguments
+        argv
+      end
+
+      def without_flags(arguments, *flags)
+        values = flags.map(&:to_s)
+        Array(arguments).map(&:to_s).reject { |argument| values.include?(argument) }
+      end
+
+      def resolve_interactive_executable(argv, cwd:, environment:)
+        name = Array(argv).first.to_s
+        path = environment.fetch("PATH", ENV.fetch("PATH", "")).to_s
+        resolved = if name.include?(File::SEPARATOR)
+                     candidate = File.expand_path(name, cwd.to_s)
+                     candidate if File.file?(candidate) && File.executable?(candidate)
+                   else
+                     path.split(File::PATH_SEPARATOR).each do |directory|
+                       directory = "." if directory.empty?
+                       candidate = File.expand_path(File.join(directory, name), cwd.to_s)
+                       break candidate if File.file?(candidate) && File.executable?(candidate)
+                     end
+                   end
+        return resolved if resolved
+
+        raise Error,
+              "The configured Pi command #{name.inspect} could not be resolved for the Agent session " \
+              "with PATH=#{path.inspect}. Configure [harness.pi] command with an executable path or make it " \
+              "available in [harness.pi.env] PATH, then restart Meringue."
+      end
+
       def prompt_delivery_marker(delivery_id)
         value = delivery_id.to_s.strip
         return nil if value.empty?

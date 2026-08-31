@@ -141,11 +141,9 @@ module Meringue
         return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
         metadata = agent.fetch("harness_metadata", {}) || {}
         resume_prompt = truthy?(value_at(payload, "_resume_worker", "resume_worker"))
-        if agent.fetch("status", nil) == "paused" && !resume_prompt
-          return rejected_result(command_id, command_type, "Worker #{agent_id} is paused. Resume it before sending another prompt.", ["worker_paused"])
-        end
-        if metadata.fetch("pause_request", nil).is_a?(Hash) && !resume_prompt
-          return rejected_result(command_id, command_type, "Worker #{agent_id} is being paused; wait for the pause to finish before prompting it.", ["worker_pause_in_progress"])
+        pending_prompt_id = present_string(value_at(payload, "_pending_prompt_id", "pending_prompt_id"))
+        if agent.fetch("status", nil) == "killed"
+          return rejected_result(command_id, command_type, "Agent #{agent_id} is killed.", ["agent_killed"])
         end
         if worker_prune_cleanup_claimed?(agent)
           return rejected_result(
@@ -156,12 +154,24 @@ module Meringue
           )
         end
         if agent_focus_ownership_active?(agent)
-          return rejected_result(
-            command_id,
-            command_type,
-            "Agent #{agent_id} is owned by its Agent session; return to the dashboard before prompting it.",
-            ["interactive_focus_active"]
+          return rejected_result(command_id, command_type, "Agent #{agent_id} has no agent session.", ["missing_harness_session"]) unless agent_has_session_reference?(agent)
+
+          return queue_transient_prompt(
+            command_id: command_id,
+            command_type: command_type,
+            agent_id: agent.fetch("id"),
+            prompt: prompt.to_s,
+            mode: mode,
+            pending_prompt_id: pending_prompt_id,
+            error: StandardError.new("the focused Agent session owns prompt delivery"),
+            queue_message: "Queued the #{prompt_delivery_noun(mode)} for worker #{agent.fetch("id")} until its focused Agent session returns."
           )
+        end
+        if agent.fetch("status", nil) == "paused" && !resume_prompt
+          return rejected_result(command_id, command_type, "Worker #{agent_id} is paused. Resume it before sending another prompt.", ["worker_paused"])
+        end
+        if metadata.fetch("pause_request", nil).is_a?(Hash) && !resume_prompt
+          return rejected_result(command_id, command_type, "Worker #{agent_id} is being paused; wait for the pause to finish before prompting it.", ["worker_pause_in_progress"])
         end
         if metadata.fetch("interactive_handoff", nil).is_a?(Hash)
           metadata = metadata.dup
@@ -222,7 +232,6 @@ module Meringue
           return rejected_result(command_id, command_type, "Agent #{agent_id} has no agent session.", ["missing_harness_session"])
         end
 
-        pending_prompt_id = present_string(value_at(payload, "_pending_prompt_id", "pending_prompt_id"))
         if pending_prompt_id
           pending_prompts = Array(metadata.fetch("pending_prompts", [])).select { |entry| entry.is_a?(Hash) }
           unless pending_prompts.any? { |entry| entry.fetch("id", nil).to_s == pending_prompt_id }
@@ -716,7 +725,7 @@ module Meringue
 
       # A session that is momentarily owned by another instance mid-turn is not a command failure.
       # The prompt is stored on the agent and redelivered by reconciliation until it lands.
-      def queue_transient_prompt(command_id:, command_type:, agent_id:, prompt:, mode:, pending_prompt_id:, error:)
+      def queue_transient_prompt(command_id:, command_type:, agent_id:, prompt:, mode:, pending_prompt_id:, error:, queue_message: nil)
         state = normalized_state
         agent = find_agent(state, agent_id)
         return failed_result(command_id, command_type, "Agent #{agent_id} disappeared before its prompt could be queued.", ["agent_not_found"]) unless agent
@@ -764,6 +773,7 @@ module Meringue
         agent["harness_metadata"] = metadata
         agent["updated_at"] = now
 
+        message = queue_message || "Queued the #{prompt_delivery_noun(mode)} for worker #{agent.fetch("id")} until its current turn settles."
         log_ids = if existing
                     []
                   else
@@ -772,7 +782,7 @@ module Meringue
                       source_type: "kernel",
                       source_id: agent.fetch("id"),
                       level: "info",
-                      message: "Waiting to deliver the #{prompt_delivery_noun(mode)} for worker #{agent.fetch("id")} until its current turn settles.",
+                      message: message,
                       details: {
                         "agent_id" => agent.fetch("id"),
                         "issue_id" => agent.fetch("issue_id", nil),
@@ -788,7 +798,7 @@ module Meringue
           command_id,
           command_type,
           agent.fetch("id"),
-          "Queued the #{prompt_delivery_noun(mode)} for worker #{agent.fetch("id")} until its current turn settles.",
+          message,
           { "agent_id" => agent.fetch("id"), "queued" => true, "pending_prompt_id" => entry.fetch("id"), "attempts" => attempts },
           log_ids
         )
@@ -842,6 +852,9 @@ module Meringue
             # prompt cannot wake a session the user deliberately stopped.
             next [] if agent.fetch("status", nil) == "paused"
             next [] if (agent.fetch("harness_metadata", {}) || {}).fetch("pause_request", nil).is_a?(Hash)
+            # Focus owns the prompt box. Keep dashboard prompts durable, but do not write through
+            # the managed transport until the focused session releases its ownership marker.
+            next [] if agent_focus_ownership_active?(agent)
             # A prompt queued while the worker was mid-turn must not be dropped just because that
             # turn then died from a transport failure; that session is still resumable.
             if TERMINAL_AGENT_STATUSES.include?(agent.fetch("status", nil)) && !worker_resumable_after_settle_failure?(agent)

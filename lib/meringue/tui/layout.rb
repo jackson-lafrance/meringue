@@ -65,10 +65,7 @@ module Meringue
             agent_workspace_pane.content_lines(state, width: metrics.fetch(:main_width) - 4),
             active: scroll_pane_active?(state, "logs"),
             overflow: :terminal,
-            # Native harness history is application-owned and is changed by
-            # forwarded wheel/page input. Only the separate worktree terminal
-            # retains a Meringue viewport offset.
-            scroll_offset: workspace.fetch("view", "agent") == "terminal" ? workspace.fetch("scroll_offset", 0) : 0,
+            scroll_offset: workspace.fetch("scroll_offset", 0),
             title_style: agent_workspace_title_style(state)
           )
           status = agent_workspace_pane.top_status_layout(state, width: metrics.fetch(:main_width) - 4)
@@ -710,11 +707,6 @@ module Meringue
         workspace = state.fetch("_agent_workspace", {}) || {}
 
         if embedded_agent_workspace?(state)
-          # The embedded harness owns its history position; its captured screen
-          # is always rendered as one viewport. The worktree terminal remains a
-          # Meringue-owned surface and keeps its existing retained-row scrolling.
-          return 0 unless workspace.fetch("view", "agent") == "terminal"
-
           dimensions = embedded_agent_workspace_dimensions(state, width: width, height: height)
           lines = agent_workspace_pane.content_lines(state, width: dimensions.fetch("columns"))
           [lines.length - dimensions.fetch("rows"), 0].max

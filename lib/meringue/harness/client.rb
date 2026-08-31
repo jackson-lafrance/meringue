@@ -219,9 +219,9 @@ module Meringue
         false
       end
 
-      # Native interactive mode is an optional legacy harness capability. It is suitable only when
-      # a backend can transfer its live transport without stopping an active turn or submitting a
-      # continuation. Generic workspace code must not assume one backend's interrupt key.
+      # Native interactive mode is an optional harness capability. A backend may attach a native
+      # terminal to its existing session without changing the session identity or submitting input.
+      # Generic workspace code must not assume one backend's interrupt key.
       def interactive_session_supported?
         false
       end
