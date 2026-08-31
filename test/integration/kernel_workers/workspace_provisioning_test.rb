@@ -115,9 +115,13 @@ class KernelWorkersWorkspaceProvisioningTest < Minitest::Test
     engine = build_engine
     context = project_with_issue(engine)
     planned = planned_workspace(context)
+    # Occupy every candidate the allocator will try: the bare task slug plus each
+    # deterministic numeric suffix, derived from the limit so raising it cannot
+    # silently turn this exhaustion case back into a successful spawn.
     occupy_directory(planned.fetch("workspace_path"))
-    occupy_directory("#{planned.fetch("workspace_path")}-2")
-    occupy_directory("#{planned.fetch("workspace_path")}-3")
+    (2..Meringue::Workspace::Manager::ALLOCATION_ATTEMPT_LIMIT).each do |candidate|
+      occupy_directory("#{planned.fetch("workspace_path")}-#{candidate}")
+    end
 
     result = apply_raw(engine, "SpawnWorker", { "issue_id" => context.fetch("issue_id"), "prompt" => "Go." })
     worker = agent(engine, "P1-I1-W1")

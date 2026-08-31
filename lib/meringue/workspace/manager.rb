@@ -53,7 +53,12 @@ module Meringue
       # A worker branch/worktree can already exist when a previous attempt was interrupted or when
       # another actor provisioned the same worker concurrently. Reuse it when it is usable, and
       # otherwise fall back to a uniquified branch/path instead of failing the spawn.
-      ALLOCATION_ATTEMPT_LIMIT = 3
+      #
+      # Candidate names are the task slug plus a deterministic numeric suffix (`-2`, `-3`, ...),
+      # so every worker on one task contends for the same sequence. The limit therefore has to
+      # cover the number of workers an issue can run at once, not just retries of one worker;
+      # `allocation_budget` still bounds how long the search may take.
+      ALLOCATION_ATTEMPT_LIMIT = 10
       OWNERSHIP_SCHEMA_VERSION = 1
       OWNERSHIP_DIRECTORY = ".ownership"
       SHARED_READ_ONLY_DIRECTORY = ".shared-read-only"
