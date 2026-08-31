@@ -71,6 +71,15 @@ class KernelWorkersQuietWorkerTest < Minitest::Test
     assert_equal 2, quiet_logs(engine).length, "a second quiet stretch is its own event"
   end
 
+  def test_an_existing_quiet_marker_suppresses_refresh_duplicates_even_if_its_value_is_false
+    engine, worker_id = quiet_worker(seconds: THRESHOLD + 60)
+    patch_agent!(worker_id) { |record| record.fetch("harness_metadata")["quiet_warning_at"] = false }
+
+    apply!(engine, "ReconcileSessions", {})
+
+    assert_empty quiet_logs(engine), "a persisted marker must suppress duplicate warnings regardless of its value"
+  end
+
   def test_prompting_a_quiet_worker_restarts_its_clock
     engine, worker_id = quiet_worker(seconds: THRESHOLD + 60)
     apply!(engine, "ReconcileSessions", {})

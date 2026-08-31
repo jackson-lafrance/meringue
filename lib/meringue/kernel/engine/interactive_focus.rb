@@ -410,6 +410,10 @@ module Meringue
               metadata = current.fetch("harness_metadata", {}) || {}
               metadata.delete("interactive_handoff")
               current["harness_metadata"] = metadata.merge(
+                # If both the managed process and rollback failed, this record no longer has a
+                # supervisor. Do not leave the dead turn looking live; that makes reconciliation
+                # report it as quiet forever and invites a focus retry against a nonexistent RPC.
+                "is_streaming" => recovered_ref.is_a?(Hash) ? recovered_ref.fetch("is_streaming", false) : false,
                 "last_interactive_handoff" => marker.merge(
                   "state" => "failed",
                   "outcome" => "prepare_failed",

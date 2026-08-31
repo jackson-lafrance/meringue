@@ -509,6 +509,8 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
     assert_includes result.fetch("errors").join(" "), "dashboard_recovery_failed"
     recovered = agent(engine, worker_id)
     assert_equal "blocked", recovered.fetch("status")
+    refute recovered.fetch("harness_metadata").fetch("is_streaming"),
+           "a failed focus rollback must not leave a dead session marked streaming"
     refute recovered.fetch("harness_metadata").key?("interactive_handoff")
     assert_equal "dashboard recovery failed", recovered.dig("harness_metadata", "last_interactive_handoff", "recovery_error")
   end
