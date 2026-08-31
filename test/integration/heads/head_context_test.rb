@@ -654,10 +654,14 @@ class HeadContextTest < Minitest::Test
     context = build_head_context
     prompt = context.system_prompt
     rules = context.to_prompt_h.dig("routing_context", "decision_rules")
-    delivery_rule = rules.find { |rule| rule.include?("ordinary request to implement and deliver a change") }
+    delivery_rule = rules.find { |rule| rule.include?("Before every push, the worker must fetch the target base branch") }
 
     refute_nil delivery_rule, "expected an explicit delivery stopping rule"
     assert_includes delivery_rule, "verified it as reasonably possible, pushed it, and opened or updated the pull request"
+    assert_includes delivery_rule, "Before every push, the worker must fetch the target base branch"
+    assert_includes delivery_rule, "even without reported pull-request conflicts"
+    assert_includes delivery_rule, "if unchanged, it must not rebase"
+    assert_includes delivery_rule, "without force-pushing or bypassing the rebase"
     assert_includes delivery_rule, "do not automatically add a completion_head, CI/review continuation, checker worker, or after_command gate"
     assert_includes delivery_rule, "The user will explicitly retrigger or request follow-up work"
     assert_includes prompt, "do not create a completion head, CI/review continuation, checker worker, or external-condition gate"
