@@ -158,99 +158,15 @@ module Meringue
         raise
       end
 
-      def interactive_session_supported?
+      # Pi workers stay in their existing RPC process while focused. The managed session view reads
+      # that process and its saved transcript, so focus entry cannot abort a turn, replace Pi, or
+      # turn command-line text into a synthetic user message.
+      def managed_session_view_supported?
         true
       end
 
-      def prepare_interactive_session(session_ref)
-        current_ref = preserve_session_identity(get_state(session_ref), session_ref)
-        current_ref = current_ref.merge(
-          "metadata" => metadata_with(session_ref, current_ref.fetch("metadata", {}))
-        )
-        was_streaming = current_ref.fetch("is_streaming", false)
-        events = read_events(current_ref)
-        rpc_ref = current_ref
-
-        session_summary = safe_session_file_summary(current_ref)
-        handoff_summary = bounded_handoff_summary(session_summary)
-        handoff_intent = handoff_summary.fetch("last_user_text", nil) || latest_user_intent(events)
-        interrupted_turn_outcome = bounded_turn_outcome(turn_outcome(current_ref))
-        turn_checkpoint = interrupted_turn_outcome
-        replacement = nil
-        begin
-          interactive_session_argv(current_ref, handoff_prompt: nil)
-        rescue ProcessNotFoundError
-          replacement = create_replacement_session_from_rpc(current_ref)
-          handoff_intent = replacement.fetch("latest_user_intent", nil) unless present?(handoff_intent)
-          current_ref = current_ref.merge(
-            "session_id" => replacement.fetch("session_id"),
-            "session_file" => replacement.fetch("session_file"),
-            "metadata" => metadata_with(current_ref, "interactive_replacement" => replacement)
-          )
-        end
-
-        handoff_prompt = if was_streaming
-                           interactive_continuation_prompt(
-                             current_ref,
-                             events: events,
-                             latest_user_intent: handoff_intent,
-                             session_summary: handoff_summary
-                           )
-                         end
-        interactive_argv = interactive_session_argv(current_ref, handoff_prompt: handoff_prompt)
-        # Resolve environment/commit-identity policy before changing RPC ownership. If validation
-        # fails, the original managed turn remains untouched and available to the rollback path.
-        interactive_env = process_environment(current_ref.fetch("cwd", Dir.pwd))
-        interactive_executable = resolve_interactive_executable(
-          interactive_argv,
-          cwd: current_ref.fetch("cwd", Dir.pwd),
-          environment: interactive_env
-        )
-        settled_ref = settle_interactive_rpc_turn(rpc_ref) if was_streaming
-        if settled_ref
-          rpc_ref = preserve_session_identity(settled_ref, rpc_ref)
-          # Pi may persist an explicit aborted assistant record. That post-abort record—not the
-          # earlier pending tool call—is the baseline a native final result must supersede.
-          turn_checkpoint = bounded_turn_outcome(turn_outcome(rpc_ref)) || turn_checkpoint
-        end
-        quiesced_ref = quiesce_interactive_rpc(rpc_ref)
-        detached_ref = quiesced_ref.merge(
-          "session_id" => current_ref.fetch("session_id", nil),
-          "session_file" => current_ref.fetch("session_file", nil),
-          "pid" => nil,
-          "is_streaming" => false,
-          "metadata" => metadata_with(
-            quiesced_ref,
-            (current_ref.fetch("metadata", {}) || {}).merge(
-              "interactive_handoff_ready" => true,
-              "interactive_handoff_prompt" => handoff_prompt,
-              "interactive_handoff_event_count" => events.length,
-              "interactive_turn_interrupted" => was_streaming,
-              "interactive_interruption_method" => was_streaming ? "rpc_abort" : nil,
-              "killed" => nil,
-              "kill_note" => nil
-            ).compact
-          )
-        )
-        {
-          "session_ref" => detached_ref,
-          "interactive_argv" => interactive_argv,
-          "interactive_executable" => interactive_executable,
-          "interactive_env" => interactive_env,
-          # Escape is Pi's interrupt key for active turns and autocompaction;
-          # Ctrl-C only clears its editor. Keep that rule inside this adapter.
-          "interactive_shutdown_input" => "\e",
-          "handoff" => interactive_handoff_metadata(
-            was_streaming: was_streaming,
-            events: events,
-            prompt: handoff_prompt,
-            latest_user_intent: handoff_intent,
-            session_summary: handoff_summary,
-            interrupted_turn_outcome: interrupted_turn_outcome,
-            turn_checkpoint: turn_checkpoint,
-            replacement: replacement
-          )
-        }
+      def interactive_session_supported?
+        false
       end
 
       def reclaim_interactive_session(session_ref, pid:)
@@ -270,22 +186,6 @@ module Meringue
         raise SessionTransportUnavailableError, "Interactive Pi process #{numeric_pid} did not stop during crash recovery"
       rescue ArgumentError, TypeError
         true
-      end
-
-      def resume_dashboard_session(session_ref, handoff: nil)
-        process = process_for_session(session_ref, required: false)
-        resumed_ref = process ? get_state(session_ref) : attach_session(session_ref)
-        return resumed_ref unless dashboard_continuation_required?(resumed_ref, handoff)
-
-        prompt = dashboard_continuation_prompt(handoff)
-        prompted_ref = prompt_session(resumed_ref, prompt, mode: "normal")
-        prompted_ref.merge(
-          "metadata" => metadata_with(
-            prompted_ref,
-            "interactive_dashboard_continuation" => "started",
-            "interactive_dashboard_continuation_prompt" => prompt
-          )
-        )
       end
 
       def wait_for_event(session_ref, type:, timeout: event_timeout)

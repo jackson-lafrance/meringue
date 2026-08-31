@@ -22,7 +22,6 @@ module Meringue
       DEFAULT_TAKEOVER_SETTLE_TIMEOUT = 5.0
       TAKEOVER_POLL_INTERVAL = 0.25
       TAKEOVER_EXIT_TIMEOUT = 5.0
-      INTERACTIVE_RPC_SHUTDOWN_TIMEOUT = 0.1
       PROMPT_DELIVERY_MARKER_PREFIX = "<!-- meringue-prompt-delivery:".freeze
 
       MODE_ALIASES = {

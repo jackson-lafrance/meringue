@@ -6,6 +6,20 @@ require "support/kernel_workers_support"
 class KernelWorkersInteractiveFocusTest < Minitest::Test
   include KernelWorkersSupport
 
+  class ManagedSessionHarnessClient < RecordingHarnessClient
+    def initialize
+      super(streaming: true, provider: "pi")
+    end
+
+    def managed_session_view_supported?
+      true
+    end
+
+    def prepare_interactive_session(_session_ref)
+      raise "managed focus must not prepare a handoff"
+    end
+  end
+
   class InteractiveHarnessClient < RecordingHarnessClient
     attr_reader :prepared, :resumed, :reclaimed
     attr_accessor :replacement_session, :prepare_error, :resume_error, :resume_streaming, :native_completed,
@@ -81,6 +95,24 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
         "metadata" => continued.fetch("metadata", {}).merge("interactive_dashboard_continuation" => "started")
       )
     end
+  end
+
+  def test_pi_focus_selects_the_managed_view_without_preparing_or_prompting
+    client = ManagedSessionHarnessClient.new
+    engine = build_engine(harness_client: client)
+    context = project_with_issue(engine)
+    worker_id = spawn_worker(engine, context.fetch("issue_id")).fetch("target_id")
+
+    assert_equal "session_view", engine.agent_focus_mode(worker_id)
+    assert_empty client.aborts
+    assert_empty client.prompts
+    assert_equal true, agent(engine, worker_id).dig("harness_metadata", "is_streaming")
+
+    direct_handoff = engine.begin_agent_interactive_focus(worker_id)
+    assert_equal "rejected", direct_handoff.fetch("status")
+    assert_equal "interactive_session_unsupported", direct_handoff.fetch("errors").first
+    assert_empty client.aborts
+    assert_empty client.prompts
   end
 
   def test_focus_safely_hands_off_a_pending_tool_turn_and_dashboard_continues_without_error

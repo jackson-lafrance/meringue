@@ -7,13 +7,14 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
   include TUISupport
 
   class RecordingView
-    attr_reader :closed, :paused, :resumed, :cancelled
+    attr_reader :closed, :paused, :resumed, :cancelled, :submitted
 
     def initialize
       @closed = false
       @paused = 0
       @resumed = 0
       @cancelled = 0
+      @submitted = []
     end
 
     def snapshot
@@ -35,6 +36,11 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
 
     def cancel_current_turn
       @cancelled += 1
+      { "status" => "accepted" }
+    end
+
+    def submit(prompt, mode: "auto")
+      @submitted << [prompt, mode]
       { "status" => "accepted" }
     end
 
@@ -255,6 +261,24 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     end
   end
 
+  class ManagedSessionFocusService < RecordingService
+    attr_reader :handoffs
+
+    def initialize
+      super
+      @handoffs = []
+    end
+
+    def agent_focus_mode(_agent_id)
+      "session_view"
+    end
+
+    def begin_agent_interactive_focus(agent_id)
+      @handoffs << agent_id
+      raise "managed focus must not start a native handoff"
+    end
+  end
+
   def setup
     @service = RecordingService.new
     @app = Meringue::TUI::App.new(
@@ -368,6 +392,44 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     @app.send(:close_agent_workspace)
     assert second.closed
     assert_equal 0, second.cancelled
+  end
+
+  def test_pi_focus_opens_the_live_managed_view_without_a_handoff_on_first_or_later_entry
+    Dir.mktmpdir("focused-managed-session-") do |workspace|
+      service = ManagedSessionFocusService.new
+      controller = Meringue::Workspace::Controller.new(focus_session_service: service)
+      app = Meringue::TUI::App.new(
+        layout: Meringue::TUI::Layout.new,
+        terminal: TUISupport::FakeTerminal.new,
+        workspace_controller: controller,
+        agent_session_service: service
+      )
+      state = @state.merge("agents" => [agent_record(
+        "P1-I1-W1",
+        "type" => "worker",
+        "status" => "working",
+        "harness" => "pi",
+        "workspace_path" => workspace,
+        "project_id" => "P1",
+        "issue_id" => "P1-I1"
+      )])
+
+      assert app.send(:open_agent_workspace_by_id, state, "P1-I1-W1")
+      refute app.instance_variable_get(:@agent_workspace_interactive)
+      refute app.instance_variable_get(:@agent_workspace_open_pending)
+      assert_equal "streaming", service.views.first.snapshot.fetch("session_state")
+      assert_empty service.handoffs
+
+      app.send(:close_agent_workspace)
+      assert app.send(:open_agent_workspace_by_id, state, "P1-I1-W1")
+      assert_equal 2, service.views.length
+      assert_equal "streaming", service.views.last.snapshot.fetch("session_state")
+      assert_empty service.handoffs
+      assert service.views.all? { |view| view.submitted.empty? }, "focus entry must not submit a prompt"
+    ensure
+      app&.send(:close_agent_workspace)
+      controller&.close
+    end
   end
 
   def test_terminal_view_pauses_refreshing_not_the_managed_session
