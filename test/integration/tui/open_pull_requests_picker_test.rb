@@ -215,7 +215,7 @@ class TuiOpenPullRequestsPickerTest < Minitest::Test
     state = compose_app_state(@app, @state)
     positions = screen_positions_for_open_pr_summary(state)
 
-    assert_equal "2 open PRs".length, positions.length
+    assert_equal "2 open PRs".length + 2, positions.length
     send_summary_click(state, positions.first)
     refute @pane.delivery_pr_picker?(compose_app_state(@app, @state)), "one click stays inert"
     send_summary_click(state, positions.fetch(1)) # one-column trackpad wobble still counts
@@ -242,12 +242,42 @@ class TuiOpenPullRequestsPickerTest < Minitest::Test
     composed = compose_app_state(@app, state)
     positions = screen_positions_for_open_pr_summary(composed)
 
-    assert_equal "1 open PR".length, positions.length
+    assert_equal "1 open PR".length + 2, positions.length
     2.times { send_summary_click(composed, positions.first) }
 
     picker = compose_app_state(@app, state)
     assert @pane.delivery_pr_picker?(picker)
     assert_equal ["› #88  Waiting for forge status  P1-I1 · unverified"], plain_lines(@pane.popup_lines(picker))
+  end
+
+  def test_the_summary_hitbox_covers_separator_padding_for_zero_one_and_several_prs
+    { 0 => "no open PRs", 1 => "1 open PR", 3 => "3 open PRs" }.each do |total, label|
+      issues = @state.fetch("issues").first(total)
+      issues << issue_record("P1-I3", "delivery_pull_requests" => [pull_request("199")]) if total > issues.length
+      state = compose_app_state(@app, @state.merge("issues" => issues))
+      positions = screen_positions_for_open_pr_summary(state)
+
+      if total.zero?
+        assert_empty positions
+        next
+      end
+
+      assert_equal label.length + 2, positions.length, "#{label.inspect} should include both separator spaces"
+      columns = positions.map { |position| position.fetch("x") }
+      assert_equal((columns.first..columns.last).to_a, columns)
+
+      # The separator glyph itself and the columns beyond the adjacent worker
+      # segment remain outside the open-PR target. Coordinates passed to the
+      # layout are zero-based, while the rendered line starts at hint_x.
+      left, = @layout.send(:dashboard_status_bar_lines, state)
+      line = plain_line(left)
+      metrics = @layout.send(:layout_metrics, WIDTH, HEIGHT, state)
+      separator_glyph = metrics.fetch(:hint_x) + line.index(label) + label.length + 1
+      refute @layout.open_pull_requests_summary_hit?(state, width: WIDTH, height: HEIGHT,
+                                                       x: separator_glyph, y: positions.first.fetch("y") - 1)
+      refute @layout.open_pull_requests_summary_hit?(state, width: WIDTH, height: HEIGHT,
+                                                       x: columns.last, y: positions.first.fetch("y") - 1)
+    end
   end
 
   def test_empty_untracked_and_scoped_summaries_are_not_actionable
