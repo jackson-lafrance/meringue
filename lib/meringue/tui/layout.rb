@@ -306,10 +306,16 @@ module Meringue
       end
 
       # The all-open-PR count is one actionable segment in the dashboard summary
-      # row, not a target covering the whole row. Map only the cells actually
-      # rendered for "1 open PR" / "N open PRs"; neighboring status and key hints
-      # retain their existing mouse behavior. A scoped issue shows its own PR
-      # instead, and zero/untracked PRs have no picker to open.
+      # row, not a target covering the whole row. Neighboring status and key
+      # hints retain their existing mouse behavior. A scoped issue shows its own
+      # PR instead, and zero/untracked PRs have no picker to open.
+      #
+      # The target is the whole label plus the blank padding that separates it
+      # from its neighbours, so there is no dead gap between the count and the
+      # "·" divider for a click to land in. Only the whitespace immediately
+      # adjacent is claimed and the divider glyph itself stays neutral, so the
+      # segments on either side can claim their own half of the same separator
+      # without either one stealing the other's columns.
       def open_pull_requests_summary_hit?(state, width:, height:, x:, y:)
         return false if settings_active?(state) || fullscreen_agent_workspace?(state)
         return false unless Settings.github_enabled?(state)
@@ -320,20 +326,27 @@ module Meringue
         return false unless y.to_i == metrics.fetch(:hint_y)
 
         label = OpenPullRequests.summary_label(state)
-        offset = 0
         dashboard_left, dashboard_right = dashboard_status_bar_lines(state)
-        dashboard_left.each do |segment|
-          text = segment.is_a?(Array) ? segment.fetch(0, "").to_s : segment.to_s
-          if text == label
-            visible_width = [text.length, hint_left_width(metrics.fetch(:hint_width), dashboard_right) - offset].min
-            return false unless visible_width.positive?
+        texts = dashboard_left.map { |segment| segment.is_a?(Array) ? segment.fetch(0, "").to_s : segment.to_s }
+        index = texts.index(label)
+        return false unless index
 
-            start_x = metrics.fetch(:hint_x) + offset
-            return x.to_i >= start_x && x.to_i < start_x + visible_width
-          end
-          offset += text.length
-        end
-        false
+        offset = texts.take(index).sum(&:length)
+        start_offset = offset - trailing_padding_width(texts[index - 1]) if index.positive?
+        start_offset ||= offset
+        end_offset = offset + label.length + leading_padding_width(texts[index + 1])
+        end_offset = [end_offset, hint_left_width(metrics.fetch(:hint_width), dashboard_right)].min
+        return false unless end_offset > start_offset
+
+        x.to_i >= metrics.fetch(:hint_x) + start_offset && x.to_i < metrics.fetch(:hint_x) + end_offset
+      end
+
+      def leading_padding_width(text)
+        text.to_s[/\A */].length
+      end
+
+      def trailing_padding_width(text)
+        text.to_s[/ *\z/].length
       end
 
       # Logs selection points are content coordinates (index into the wrapped log
