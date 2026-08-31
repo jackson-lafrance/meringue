@@ -70,6 +70,16 @@ class TuiChatInputNavigationTest < Minitest::Test
     assert_equal ["unfinished draft", "unfinished draft".length, -1], restored
   end
 
+  def test_escape_exits_agent_tree_navigation_without_clearing_the_draft
+    state = composed_state(tui_state)
+    @app.send(:enter_agent_tree_navigation, state)
+
+    result = @app.send(:handle_key, "\e", "draft", 5, -1, nil, state_for("draft", 5))
+
+    assert_equal ["draft", 5, -1], result
+    refute @app.instance_variable_get(:@agent_tree_navigation_active)
+  end
+
   def test_ctrl_c_clears_non_empty_input_but_quits_when_empty
     assert_equal ["", 0, -1], send_key(CTRL_C, "draft", 5)
     refute @app.send(:quit_key?, CTRL_C, "draft")
