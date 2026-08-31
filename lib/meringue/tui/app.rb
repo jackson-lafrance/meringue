@@ -577,13 +577,13 @@ module Meringue
         selection_movement_result = handle_selection_movement_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         return selection_movement_result if selection_movement_result
 
-        if slash_suggestion_navigation_key?(key) && slash_suggestions_active?(input_buffer)
+        if dashboard_slash_suggestion_navigation_key?(key) && slash_suggestions_visible?(input_buffer, state)
           buffer, index = handle_slash_suggestion_navigation(key, input_buffer, slash_suggestion_index, state)
           reset_chat_history_navigation if buffer != input_buffer
           return [buffer, buffer.chars.length, index]
         end
 
-        focus_result = handle_focus_key(key, input_buffer, input_cursor, slash_suggestion_index)
+        focus_result = handle_focus_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         return focus_result if focus_result
 
         scroll_result = handle_focused_scroll_key(key, input_buffer, input_cursor, slash_suggestion_index, state)

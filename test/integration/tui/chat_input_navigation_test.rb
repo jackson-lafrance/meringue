@@ -15,6 +15,8 @@ class TuiChatInputNavigationTest < Minitest::Test
   HEIGHT = Meringue::TUI::App::DEFAULT_HEIGHT
   UP = "\e[A"
   DOWN = "\e[B"
+  TAB = "\t"
+  SHIFT_TAB = "\e[Z"
   ENTER = "\r"
   CTRL_C = "\u0003"
   CTRL_Z = "\u001a"
@@ -116,6 +118,50 @@ class TuiChatInputNavigationTest < Minitest::Test
     assert_equal "/", result.fetch(0)
     assert_equal records.length - 1, result.fetch(2)
     refute_equal "older submitted prompt", result.fetch(0)
+  end
+
+  def test_tab_cycles_visible_slash_suggestions_without_changing_focus
+    state = state_for("/", 1)
+    records = Meringue::Input::SlashCommandParser.command_suggestion_records("/", limit: nil, state: state)
+    assert_operator records.length, :>, 1
+
+    first = @app.send(:handle_key, TAB, "/", 1, -1, nil, state)
+    second = @app.send(:handle_key, TAB, "/", 1, first.fetch(2), nil, state)
+    wrapped = @app.send(:handle_key, TAB, "/", 1, records.length - 1, nil, state)
+    backward = @app.send(:handle_key, SHIFT_TAB, "/", 1, 0, nil, state)
+
+    assert_equal ["/", 1, 0], first
+    assert_equal ["/", 1, 1], second
+    assert_equal ["/", 1, 0], wrapped, "forward selection should wrap"
+    assert_equal ["/", 1, records.length - 1], backward, "backward selection should wrap"
+    assert_equal "chat", @app.instance_variable_get(:@focused_pane)
+
+    @app.instance_variable_set(:@focused_pane, "logs")
+    stationary = @app.send(:handle_key, TAB, "/", 1, 0, nil, state)
+    assert_equal ["/", 1, 1], stationary
+    assert_equal "logs", @app.instance_variable_get(:@focused_pane)
+  end
+
+  def test_enter_accepts_the_suggestion_selected_with_tab
+    state = state_for("/", 1)
+    cycled = @app.send(:handle_key, TAB, "/", 1, -1, nil, state)
+    expected = Meringue::Input::SlashCommandParser.command_suggestion_records("/", limit: nil, state: state).fetch(0).fetch("completion")
+
+    accepted = @app.send(:handle_key, ENTER, cycled.fetch(0), cycled.fetch(1), cycled.fetch(2), nil, state)
+
+    assert_equal [expected, expected.length, -1], accepted
+  end
+
+  def test_tab_and_shift_tab_move_focus_when_no_suggestion_list_is_visible
+    state = state_for("/not-a-command", "/not-a-command".length)
+
+    moved_forward = @app.send(:handle_key, TAB, "/not-a-command", "/not-a-command".length, -1, nil, state)
+    assert_equal ["/not-a-command", "/not-a-command".length, -1], moved_forward
+    assert_equal "agent_tree", @app.instance_variable_get(:@focused_pane)
+
+    moved_backward = @app.send(:handle_key, SHIFT_TAB, "/not-a-command", "/not-a-command".length, -1, nil, state)
+    assert_equal ["/not-a-command", "/not-a-command".length, -1], moved_backward
+    assert_equal "chat", @app.instance_variable_get(:@focused_pane)
   end
 
   private

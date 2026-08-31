@@ -32,8 +32,8 @@ agent_select_next = ["j", "down", "right"]
 - Click a worker id, worker title, or nonblank worker-authored message text in the logs pane: select/highlight that worker in the AgentTree and scope the logs to it. The exact targets exclude timestamps, icons, gutters, separators, status rows, trailing whitespace, head output, and kernel/user rows. A removed worker is inert. The logs pane keeps focus and its scroll position; an already-active jump cursor follows the worker without changing keyboard mode.
 - Double-click text in the logs pane: select the word under the pointer. Triple-click: select the complete displayed paragraph, including all of its soft-wrapped rows (see [Text selection and clipboard](#text-selection-and-clipboard)). Drag, double-click, and triple-click selection take precedence over worker activation, and text-click tracking is per pane, so tree clicks and text clicks never pair up.
 - Double-click an issue to open its delivery PR; without a PR it shows a transient notice and does not open a worker workspace. Double-click a worker with an assigned workspace to open its focused workspace; a worker without a workspace is a silent no-op.
-- `Tab` / `Ctrl-Tab`: move focus forward.
-- `Shift-Tab`: move focus backward.
+- `Tab` / `Ctrl-Tab`: move focus forward, unless the chat composer shows suggestions; then cycle the list forward with wraparound.
+- `Shift-Tab`: move focus backward, unless the chat composer shows suggestions; then cycle the list backward with wraparound.
 - Arrow keys and `PageUp` / `PageDown`: scroll the focused non-chat pane by a line or a page.
 - `Home` / `End`: scroll the focused non-chat pane to its first or last content line. With the logs selection cursor on, `Home` / `End` still move the cursor within its line.
 - Mouse wheel: scroll whichever pane the pointer is over, without changing focus. Hovering a pane that cannot scroll (or the composer) falls back to scrolling the focused pane.
@@ -69,7 +69,7 @@ Run `ruby -Ilib -Itest test/integration/tui/agent_tree_identity_test.rb` for aut
 
 The AgentTree pane scrolls like any other pane, so a long tree of projects, issues, and agents is never silently clipped.
 
-- Focus the AgentTree (`Tab` / `Ctrl-Tab`, or click it), then arrow keys scroll by a line, `PageUp` / `PageDown` by a page, and `Home` / `End` jump to the first or last row.
+- When no chat suggestion list is open, focus the AgentTree (`Tab` / `Ctrl-Tab`, or click it), then arrow keys scroll by a line, `PageUp` / `PageDown` by a page, and `Home` / `End` jump to the first or last row.
 - The mouse wheel scrolls the tree whenever the pointer is over the pane, including while jump mode is active and while another pane has focus.
 - The pane title shows how much is off screen as `agent tree  ↑<above> ↓<below>`; the counts disappear once the whole tree fits, so a clipped tree cannot be mistaken for missing data.
 - Offsets are clamped to real content, and are re-clamped when the terminal is resized or when the tree shrinks (issues or workers completing, `/prune`, kills), so scrolling past either end never builds up a dead offset.
@@ -269,8 +269,9 @@ On macOS terminals, `Alt-V` requires Option to be sent as Meta (Terminal.app: "U
 
 - Type `/` to show command suggestions. Nothing is selected until you navigate the list, so `Enter` still sends what you typed.
 - `Up` / `Down`: select a suggestion; `Down` starts at the first entry and `Up` starts at the last.
+- `Tab` / `Ctrl-Tab`: cycle forward through the visible suggestions with wraparound.
+- `Shift-Tab`: cycle backward through the visible suggestions with wraparound.
 - `Enter`: insert the selected suggestion into the input. Press `Enter` again to run it.
-- `Tab`: complete the selected suggestion, or the first one when nothing is selected.
 - Commands that take a record id (`/kill`, `/prompt`, `/jump`, `/issue rename`, and friends) suggest matching ids **shortest first**: an id is offered before the ids nested under it. Typing `/kill p3` lists `P3`, then `P3-I10`, then `P3-I10-W1`, and typing `/kill i10` lists `P3-I10` above `P3-I10-W1`, so killing an issue never means arrowing past its own workers. Same depth sorts numerically (`P3-I2` before `P3-I10`), an exactly typed id stays on top, and with nothing typed after the command each list keeps its own order (`/prompt ` offers live workers before the failed heads it can retry).
 - The box shows a window of three entries and holds **commands only**. When the list is longer than the window, a dim caption renders on its own line *below* the box: `1–3 of 27 commands  ·  ↑↓ scroll · keep typing to filter`. It is a caption about the list, not a row in it, so the window never loses an entry to it; a list that fits the window has no caption at all. The same slot and the same caption placement are used by the `/questions` picker, the `/prs` / unscoped-`Ctrl-B` open-PR picker (`2 open PRs  ·  ↑↓ move · Enter opens · Esc closes`), and by the `/models` model picker. The focused-workspace `workspace commands` list is unwindowed and has no caption.
 

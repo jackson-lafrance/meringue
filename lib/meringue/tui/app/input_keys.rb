@@ -114,22 +114,26 @@ module Meringue
         @chat_redo_history.clear
       end
 
-      def slash_suggestion_key?(key)
-        keybinding?("complete_suggestion", key)
-      end
-
       def slash_suggestion_navigation_key?(key)
         keybinding?("complete_suggestion", key) || keybinding?("suggestion_previous", key) || keybinding?("suggestion_next", key)
+      end
+
+      def dashboard_slash_suggestion_navigation_key?(key)
+        keybinding?("focus_previous", key) || keybinding?("focus_next", key) || slash_suggestion_navigation_key?(key)
+      end
+
+      def slash_suggestions_visible?(input_buffer, state)
+        slash_suggestion_records(input_buffer, state).any?
       end
 
       def handle_slash_suggestion_navigation(key, input_buffer, slash_suggestion_index, state)
         records = slash_suggestion_records(input_buffer, state)
         return [input_buffer, NO_SLASH_SELECTION] if records.empty?
 
-        if keybinding?("suggestion_previous", key)
+        if keybinding?("suggestion_previous", key) || keybinding?("focus_previous", key)
           return [input_buffer, slash_selection?(slash_suggestion_index) ? (slash_suggestion_index - 1) % records.length : records.length - 1]
         end
-        if keybinding?("suggestion_next", key)
+        if keybinding?("suggestion_next", key) || keybinding?("focus_next", key)
           return [input_buffer, slash_selection?(slash_suggestion_index) ? (slash_suggestion_index + 1) % records.length : 0]
         end
 
@@ -141,8 +145,9 @@ module Meringue
         slash_suggestion_index.to_i >= 0
       end
 
-      def handle_focus_key(key, input_buffer, input_cursor, slash_suggestion_index)
-        return nil if slash_suggestions_active?(input_buffer) && slash_suggestion_key?(key)
+      def handle_focus_key(key, input_buffer, input_cursor, slash_suggestion_index, state = nil)
+        return nil if state && slash_suggestions_visible?(input_buffer, state) &&
+                      (keybinding?("focus_previous", key) || keybinding?("focus_next", key))
 
         if keybinding?("focus_previous", key)
           cycle_focus(-1)

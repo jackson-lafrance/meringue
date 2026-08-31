@@ -48,8 +48,8 @@ module Meringue
       # Rows for the picker: the current default first, then every other model
       # grouped by provider and sorted by id, filtered by the typed query.
       #
-      # This intentionally differs from `/model <Tab>` completion, which
-      # interleaves providers because only three rows are visible there and one
+      # This intentionally differs from `/model` slash suggestions, which
+      # interleave providers because only three rows are visible there and one
       # provider would fill the whole window. The picker shows ten rows and is
       # searched rather than glanced at, so provider grouping is the easier list
       # to scan and `openai` narrows to one provider immediately.

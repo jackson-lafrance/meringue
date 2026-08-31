@@ -123,7 +123,7 @@ Supported action names:
 - `focus_next`, `focus_previous`
 - `scroll_up`, `scroll_down`, `scroll_page_up`, `scroll_page_down`, `scroll_top`, `scroll_bottom`
 - `submit`, `newline`
-- `complete_suggestion`, `suggestion_previous`, `suggestion_next`
+- `complete_suggestion` (defaults to `tab` for focused workspace and guidance-editor completion), `suggestion_previous`, `suggestion_next`
 - `cursor_left`, `cursor_right`, `cursor_up`, `cursor_down`, `cursor_home`, `cursor_end`, `cursor_word_left`, `cursor_word_right`
 - `delete_backward`, `delete_forward`, `delete_word_backward`, `delete_word_forward`
 - `copy_selection`, `cut_selection`, `paste_clipboard`
