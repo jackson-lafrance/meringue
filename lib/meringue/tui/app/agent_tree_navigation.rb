@@ -19,7 +19,9 @@ module Meringue
 
           clear_log_scope
           exit_agent_tree_navigation("Agent tree navigation cancelled.")
-          return [+"", 0, NO_SLASH_SELECTION]
+          # Cancelling navigation is a dashboard mode action, not a composer edit.
+          # Keep the user's draft intact while dropping the tree context.
+          return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
         scroll_result = handle_navigation_scroll_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
