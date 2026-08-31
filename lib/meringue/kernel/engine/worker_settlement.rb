@@ -8,7 +8,8 @@ module Meringue
       # Settling a worker is a classification, not a rubber stamp. A turn that ended because the
       # transport or provider request died (a dropped wifi connection is the common case), or a
       # session that disappeared without ever producing a final message, settles as `errored`
-      # with a human-readable reason. Only a turn that really finished settles as `completed`.
+      # with a human-readable reason. A resumable incomplete tool turn stays promptable instead.
+      # Only a turn that really finished settles as `completed`.
       def mark_worker_completed(agent_id:, harness_events: [], last_assistant_text: nil, session_ref: nil, settle_failure: nil)
         settle_failure ||= worker_settle_failure(
           agent_id: agent_id,
@@ -122,6 +123,7 @@ module Meringue
           end
 
           merge_session_ref_into_agent!(agent, session_ref) if session_ref
+          clear_incomplete_turn!(agent)
           now = timestamp
           agent["status"] = "completed"
           agent["updated_at"] = now
@@ -171,10 +173,76 @@ module Meringue
         end
       end
 
-      # Records a worker whose harness turn ended without finishing. The worker becomes `errored`
-      # with the failure reason on its record, in its log line, and in the UI, and its issue is
-      # never rolled up to `completed` on the back of it. The harness session, worktree, branch,
-      # and any queued prompt are all left intact so the worker stays recoverable.
+      # Records an incomplete tool turn whose session remains available. It is not a settlement:
+      # the worker stays promptable and its issue remains active until a later turn completes.
+      def record_worker_incomplete_turn_in_state(state, agent:, turn_outcome:, harness_events:, last_assistant_text:, session_ref:)
+        failure = settle_failure_record(turn_outcome)
+        already_recorded = incomplete_turn_already_recorded?(agent, failure)
+        if already_recorded && %w[idle working].include?(agent.fetch("status", nil).to_s)
+          return accepted_result(
+            nil,
+            "MarkWorkerSettleFailed",
+            agent.fetch("id"),
+            "Worker #{agent.fetch("id")} still has an incomplete but recoverable agent turn.",
+            worker_completion_result(agent, find_issue(state, agent.fetch("issue_id", nil))),
+            []
+          ).merge("recoverable_incomplete_turn" => true)
+        end
+
+        merge_session_ref_into_agent!(agent, session_ref) if session_ref
+        clear_settle_failure!(agent)
+        now = timestamp
+        recorded_failure = failure.merge("detected_at" => now, "recoverable" => true)
+        agent["status"] = "idle"
+        agent["updated_at"] = now
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        metadata_updates = {
+          "is_streaming" => false,
+          "incomplete_turn" => recorded_failure,
+          "status_reason" => incomplete_turn_status_reason(recorded_failure)
+        }
+        partial_text = present_string(last_assistant_text) || present_string(turn_outcome.fetch("last_assistant_text", nil))
+        metadata_updates["last_assistant_text"] = partial_text if partial_text
+        agent["harness_metadata"] = metadata.merge(metadata_updates).compact
+
+        issue = find_issue(state, agent.fetch("issue_id", nil))
+        refresh_worker_parent_statuses!(state, agent, now)
+        details = {
+          "issue_id" => agent.fetch("issue_id", nil),
+          "project_id" => agent.fetch("project_id", nil),
+          "workspace_branch" => agent.fetch("workspace_branch", nil),
+          "settled_event_count" => Array(harness_events).length,
+          "incomplete_turn" => recorded_failure,
+          "recoverable" => true
+        }.compact
+        log_ids = append_harness_event_logs(state, agent, harness_events)
+        unless already_recorded
+          log_ids.concat(append_log(
+            state,
+            source_type: "worker",
+            source_id: agent.fetch("id"),
+            level: "warning",
+            message: "Worker #{agent.fetch("id")} stopped while a tool call was pending; its agent session remains recoverable. Prompt it to continue.",
+            details: details
+          ))
+        end
+        touch_state!(state, now)
+        store.save(state)
+
+        accepted_result(
+          nil,
+          "MarkWorkerSettleFailed",
+          agent.fetch("id"),
+          "Kept worker #{agent.fetch("id")} recoverable after its incomplete tool turn.",
+          worker_completion_result(agent, issue),
+          log_ids
+        ).merge("recoverable_incomplete_turn" => true)
+      end
+
+      # Records a worker whose harness turn ended without finishing. A provider or transport
+      # failure becomes `errored`; an incomplete tool turn with a resumable session takes the
+      # recoverable path above instead. The harness session, worktree, branch, and queued prompt
+      # remain intact in both cases.
       def record_worker_settle_failure(agent_id:, settle_failure:, harness_events: [], last_assistant_text: nil, session_ref: nil)
         synchronized_state do
           state = normalized_state
@@ -192,6 +260,15 @@ module Meringue
 
           raw_failure = settle_failure.is_a?(Hash) ? stringify_keys(settle_failure) : {}
           failure = settle_failure_record(raw_failure)
+          return record_worker_incomplete_turn_in_state(
+            state,
+            agent: agent,
+            turn_outcome: raw_failure,
+            harness_events: harness_events,
+            last_assistant_text: last_assistant_text,
+            session_ref: session_ref
+          ) if recoverable_incomplete_turn?(failure, agent)
+
           # Reconciliation keeps polling a settled session, so re-observing the same dead turn
           # must be a silent no-op instead of another error log every pass. Evidence older than
           # the last delivered prompt is stale for the same reason: the user already recovered.
@@ -207,6 +284,7 @@ module Meringue
           end
 
           merge_session_ref_into_agent!(agent, session_ref) if session_ref
+          clear_incomplete_turn!(agent)
           now = timestamp
           failure = failure.merge("detected_at" => now)
           agent["status"] = "errored"

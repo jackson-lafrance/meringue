@@ -101,21 +101,28 @@ class KernelWorkersSettleClassificationTest < Minitest::Test
     end
   end
 
-  def test_a_tool_call_that_stops_before_a_final_result_settles_the_worker_as_errored
+  def test_a_tool_call_that_stops_before_a_final_result_keeps_the_worker_recoverable
     engine, context, worker_id = build_worker(incomplete_turn_client)
 
     result = apply!(engine, "ReconcileSessions", {})
     poll = result.dig("result", "poll_results").first
     worker = agent(engine, worker_id)
 
-    assert_equal "settle_failed", poll.fetch("state")
-    assert_equal "errored", worker.fetch("status")
+    assert_equal "recoverable", poll.fetch("state")
+    assert_equal "idle", worker.fetch("status")
     assert_nil worker.dig("harness_metadata", "completed_at")
-    assert_equal "pending_tool_call", worker.dig("harness_metadata", "settle_failure", "kind")
-    assert_equal "toolUse", worker.dig("harness_metadata", "settle_failure", "stop_reason")
+    assert_nil worker.dig("harness_metadata", "settle_failure")
+    assert_equal "pending_tool_call", worker.dig("harness_metadata", "incomplete_turn", "kind")
+    assert_equal "toolUse", worker.dig("harness_metadata", "incomplete_turn", "stop_reason")
     assert_match(/stopped while a tool call was still pending/, worker.dig("harness_metadata", "status_reason"))
-    assert_equal "errored", issue(engine, context.fetch("issue_id")).fetch("status")
+    assert_equal "working", issue(engine, context.fetch("issue_id")).fetch("status")
     refute_includes log_messages(engine), "Worker #{worker_id} completed."
+    assert log_messages(engine).any? { |message| message.include?("Worker #{worker_id} stopped while a tool call was pending") }
+
+    prompt = apply!(engine, "PromptAgent", { "agent_id" => worker_id, "prompt" => "Continue the pending tool call." })
+    assert_equal "accepted", prompt.fetch("status")
+    assert_equal "working", agent(engine, worker_id).fetch("status")
+    assert_nil agent(engine, worker_id).dig("harness_metadata", "incomplete_turn")
   end
 
   def test_a_tool_call_failure_keeps_the_worker_recoverable_and_its_dependent_queued
@@ -130,7 +137,7 @@ class KernelWorkersSettleClassificationTest < Minitest::Test
 
     apply!(engine, "ReconcileSessions", {})
 
-    assert_equal "errored", agent(engine, worker_id).fetch("status")
+    assert_equal "idle", agent(engine, worker_id).fetch("status")
     assert_equal "queued", agent(engine, dependent_id).fetch("status")
     assert_equal "waiting", agent(engine, dependent_id).dig("harness_metadata", "deferred_spawn", "state")
     assert Dir.exist?(agent(engine, worker_id).fetch("workspace_path")), "the failed turn must not remove its worktree"
@@ -139,6 +146,7 @@ class KernelWorkersSettleClassificationTest < Minitest::Test
     client.last_assistant_text = "Finished the tool call and shipped the change."
     prompt = apply!(engine, "PromptAgent", { "agent_id" => worker_id, "prompt" => "Continue from the interrupted tool call." })
     assert_equal "accepted", prompt.fetch("status")
+    assert_nil agent(engine, worker_id).dig("harness_metadata", "incomplete_turn")
     apply!(engine, "ReconcileSessions", {})
 
     assert_equal "completed", agent(engine, worker_id).fetch("status")

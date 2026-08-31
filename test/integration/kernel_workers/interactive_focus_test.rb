@@ -558,6 +558,39 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
     assert_includes failure_log.fetch("message"), "handoff preparation failed"
   end
 
+  def test_prepare_failure_does_not_settle_a_pending_tool_turn_or_start_recovery
+    client = InteractiveHarnessClient.new
+    client.streaming = true
+    client.resume_streaming = false
+    client.prepare_error = IOError.new("handoff preparation failed")
+    client.reported_turn_outcome = {
+      "state" => "incomplete",
+      "kind" => "pending_tool_call",
+      "reason" => "its last turn stopped while a tool call was still pending",
+      "stop_reason" => "toolUse"
+    }
+    engine = build_engine(harness_client: client)
+    context = project_with_issue(engine)
+    worker_id = spawn_worker(engine, context.fetch("issue_id"), prompt: "Keep this assignment.").fetch("target_id")
+    original = agent(engine, worker_id)
+
+    failed = engine.begin_agent_interactive_focus(worker_id)
+    client.streaming = false
+    reconciled = engine.reconcile_sessions
+    recovered = agent(engine, worker_id)
+
+    assert_equal "failed", failed.fetch("status")
+    assert_equal "recoverable", reconciled.dig("result", "poll_results").first.fetch("state")
+    assert_equal "idle", recovered.fetch("status")
+    assert_equal original.fetch("harness_session_id"), recovered.fetch("harness_session_id")
+    assert_equal original.fetch("harness_session_file"), recovered.fetch("harness_session_file")
+    assert Dir.exist?(recovered.fetch("workspace_path")), "focus preparation must not remove the worker workspace"
+    assert_nil recovered.dig("harness_metadata", "settle_failure")
+    assert_equal "pending_tool_call", recovered.dig("harness_metadata", "incomplete_turn", "kind")
+    assert log_messages(engine).any? { |message| message.include?("Could not prepare worker #{worker_id} for interactive focus") }
+    refute_includes log_messages(engine), "Started one bounded self-fixing recovery for worker #{worker_id}"
+  end
+
   def test_prepare_and_rollback_failure_does_not_leave_a_false_interactive_owner
     client = InteractiveHarnessClient.new
     client.streaming = true

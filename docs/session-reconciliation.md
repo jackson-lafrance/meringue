@@ -201,22 +201,26 @@ Each pass therefore classifies a settled worker session instead of assuming it f
    final assistant message at all, so a real result followed by a clean process exit is
    still a completion
 
-A classified failure settles the worker as `errored` with the reason on the record
+A provider or transport failure settles the worker as `errored` with the reason on the record
 (`harness_metadata.settle_failure`, `settle_state`, `status_reason`), in one `error` log line
 (`Worker <id> errored without finishing: …`), and in the AgentTree and focused pane. No
 `completed_at` is written, so the issue and project cannot roll up to `completed` behind it.
+An incomplete `pending_tool_call` or `interrupted_tool_call` with a session reference is different:
+Meringue records `harness_metadata.incomplete_turn`, leaves the worker `idle`, and keeps it
+promptable instead of turning recoverable work into an error.
 
 Native focused-mode ownership changes do not weaken this classifier. The kernel persists an
 `interactive_handoff` before Pi process I/O, reconciliation skips the worker while that marker has
 a live owner, and entry uses Pi's abort/settle boundary before replacing the RPC writer. On return,
 the dashboard either observes a newer final result or automatically starts the handoff's saved
-continuation before clearing the marker. A `toolUse` outcome outside that coordinated lifecycle is
-still incomplete and still errors; the handoff prevents an intentional focus transition from being
-mistaken for an abandoned tool call.
+continuation before clearing the marker. A `toolUse` outcome outside that coordinated lifecycle
+still records incomplete work as recoverable when the session reference remains available; the handoff
+prevents an intentional focus transition from being mistaken for an abandoned tool call.
 
 These records deliberately keep `reconcile_state: healthy` and are **not** marked
-`terminal_error`: reconciliation did its job, and the worker is still recoverable. That means
-they stay poll candidates, so the two log-once rules that matter here are its own:
+`terminal_error`: reconciliation did its job, and the worker is still recoverable. Both an errored
+settle and an incomplete recoverable turn stay poll candidates, so the log-once rules that matter
+here are its own:
 
 - re-observing the same dead turn is a silent no-op (compared by failure signature, not by
   the moving `detected_at`), so an already-errored record is never re-logged pass after pass
@@ -224,22 +228,19 @@ they stay poll candidates, so the two log-once rules that matter here are its ow
   was prompted back to work is not re-errored from the persisted evidence of the turn it
   already recovered from
 
-A settle-failed worker stays recoverable in every direction: its harness session reference,
-workspace, worktree, and branch are untouched, queued `pending_prompts` are still
-redelivered, `PromptAgent` accepts it while it still has a session reference, and a session
-that starts streaming again (for example because the user jumped into it) clears the recorded
-reason on the next pass. A worker whose session reference is gone remains terminal.
+A recoverable incomplete turn and an errored settle both preserve the harness session reference,
+workspace, worktree, and branch. Queued `pending_prompts` are still redelivered, `PromptAgent`
+accepts the worker while it still has a session reference, and a session that starts streaming again
+clears `incomplete_turn` and any recorded settle reason. A pending outcome without a session
+reference remains terminal because Meringue cannot resume it.
 
-The same reasoning applies to a worker queued behind it with `after_agent_id`: an `errored`
-predecessor normally cancels its dependent, but a predecessor that only stopped because its turn
-was cut short keeps the dependent waiting, because *reconciliation itself* resumes that session and
-the chain continues without anyone doing anything. That is the whole test
-(`deferred_predecessor_can_still_finish?`): waiting is only correct when Meringue is the one who
-will make the predecessor finish. A predecessor whose harness process alone is gone fails it,
-because nothing revives that worker without a user prompt, so its dependents are resolved by their
-`if_predecessor_fails` policy instead of waiting for a human for an unbounded time. A process lost
-with its shared supervisor is recovered before settle, so its dependent keeps its original queue
-position. If bounded supervisor recovery is exhausted, ordinary process-exit settlement applies.
+A pending-tool-call predecessor with an idle, recoverable worker keeps its dependent waiting until a
+prompt continues the predecessor. An `errored` predecessor normally cancels its dependent, while a
+predecessor that reconciliation itself resumes keeps the dependent waiting through that recovery.
+A process exit without pending-tool-call evidence is not something to queue behind: its dependents
+use `if_predecessor_fails` instead of waiting for a human without a bound. A process lost with its
+shared supervisor is recovered before settle, so its dependent keeps its original queue position.
+If bounded supervisor recovery is exhausted, ordinary process-exit settlement applies.
 `if_predecessor_fails: "run"` still activates the dependent immediately, and killing the
 predecessor still cancels the chain.
 
@@ -283,10 +284,12 @@ happened, ~70 seconds and three orphaned harness processes later.
   classified as a dead process.
 - **Classified on the first pass that sees it.** `Engine#worker_harness_process_gone?` is checked
   *before* the generic resume ladder. It then follows one of two proved causes: shared-supervisor
-  recovery below, or ordinary isolated-process settlement. The latter settles the worker as
-  `errored` with `settle_failure.kind: "harness_process_exited"`,
-  `source: "harness_process_exit"`, and a reason that names the exit (`… (exit code 1)`,
-  `… (terminated by signal 9)`). Detection latency is one reconcile pass -
+  recovery below, or ordinary isolated-process settlement. If the durable turn outcome identifies
+  a pending tool call, the session-file evidence takes the recoverable incomplete path instead. The
+  ordinary isolated-process path settles the worker as `errored` with
+  `settle_failure.kind: "harness_process_exited"`, `source: "harness_process_exit"`, and a reason
+  that names the exit (`… (exit code 1)`, `… (terminated by signal 9)`). Detection latency is one
+  reconcile pass -
   `RECONCILE_INTERVAL` is 2.0s - instead of "whenever a resume happened to be attempted".
 - **An isolated exit is never re-prompted.** If the recorded Meringue transport owner is still
   alive (or there is no shared-supervisor evidence), there is no `attach_session`,

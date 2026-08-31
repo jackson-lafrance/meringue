@@ -441,6 +441,7 @@ module Meringue
         # The prompt landed, so a recorded dead-turn reason is history. Cleared after the merge
         # because the session ref carries the agent's own metadata back in.
         clear_settle_failure!(agent)
+        clear_incomplete_turn!(agent)
         # A delivered prompt is activity. Restarting the clock here also clears any standing quiet
         # warning, so a worker the user just poked is not still labelled quiet from before.
         record_worker_activity!(agent, now)
@@ -673,6 +674,7 @@ module Meringue
         agent["status"] = "working"
         agent["updated_at"] = timestamp
         clear_settle_failure!(agent)
+        clear_incomplete_turn!(agent)
         record_worker_activity!(agent, timestamp)
         remove_pending_prompts!(agent, pending_prompt_id: pending_prompt_id, command_id: command_id)
 

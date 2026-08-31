@@ -317,6 +317,7 @@ module Meringue
         )
         log_entry_ids = result.fetch("log_entry_ids", [])
         poll_result.merge(
+          "state" => result.fetch("recoverable_incomplete_turn", false) ? "recoverable" : poll_result.fetch("state"),
           "changed" => result.fetch("status", nil) == "accepted" && log_entry_ids.any?,
           "settle_failure_result" => result,
           "log_entry_ids" => log_entry_ids
@@ -360,8 +361,9 @@ module Meringue
         previous_agent = deep_copy(agent)
         previous_parent_statuses = worker_parent_statuses(state, agent)
         merge_session_ref_into_agent!(agent, poll_result.fetch("session_ref", {}), persist_heartbeat: false)
-        # The session is streaming again, so a recorded dead-turn reason is stale.
+        # The session is streaming again, so a recorded incomplete or dead-turn reason is stale.
         clear_settle_failure!(agent)
+        clear_incomplete_turn!(agent)
         agent["status"] = "working"
         log_ids = append_harness_event_logs(state, agent, poll_result.fetch("events", []))
         log_ids.concat(append_session_model_substitution_log(state, agent))
