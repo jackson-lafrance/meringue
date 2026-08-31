@@ -116,7 +116,8 @@ module Meringue
       #
       #   "live_terminal" - the session already runs in an interactive process Meringue owns, and
       #                     focusing it is a pure attach.
-      #   "handoff"       - the backend must settle and release its managed transport first.
+      #   "session_view"  - the existing managed transport stays live while its transcript renders.
+      #   "handoff"       - the backend can transfer its live transport without interrupting it.
       #   "none"          - the backend has no focusable session.
       def agent_focus_mode(agent_id)
         agent = synchronized_state { find_agent(normalized_state, agent_id.to_s) }
@@ -129,6 +130,9 @@ module Meringue
         end
         return "none" unless client
         return "live_terminal" if client.respond_to?(:live_terminal_supported?) && client.live_terminal_supported?
+        if client.respond_to?(:managed_session_view_supported?) && client.managed_session_view_supported?
+          return "session_view"
+        end
         return "handoff" if client.respond_to?(:interactive_session_supported?) && client.interactive_session_supported?
 
         "none"

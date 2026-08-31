@@ -260,64 +260,6 @@ class HarnessPiClientTransportTest < HarnessIntegrationTest
     assert_equal attached.fetch("pid"), ownership.record_for("pi-sess-1").fetch("pid")
   end
 
-  def test_restore_and_focus_handoff_preserve_a_colon_slash_model_id
-    reference = "fireworks/fireworks:accounts/fireworks/models/glm-5p3"
-    model_change = {
-      "type" => "model_change",
-      "id" => "model-1",
-      "parentId" => "m2",
-      "provider" => "fireworks",
-      "modelId" => "fireworks:accounts/fireworks/models/glm-5p3"
-    }
-    thinking_change = {
-      "type" => "thinking_level_change",
-      "id" => "thinking-1",
-      "parentId" => "model-1",
-      "thinkingLevel" => "high"
-    }
-    mangled_assistant = {
-      "type" => "message",
-      "id" => "m3",
-      "parentId" => "thinking-1",
-      "message" => {
-        "role" => "assistant",
-        "provider" => "fireworks",
-        "model" => "accounts/fireworks/models/glm-5p3",
-        "content" => [{ "type" => "text", "text" => "continued" }],
-        "stopReason" => "endTurn"
-      }
-    }
-    session_file = pi_session_file(
-      tmpdir,
-      session_id: "sess-complex-model",
-      extra_lines: [model_change, thinking_change, mangled_assistant].map { |record| JSON.generate(record) }
-    )
-    client, stub = build_pi_client(
-      tmpdir,
-      stub_config: { "session_id" => "sess-complex-model" },
-      extra_args: ["--model", "openai/future-default", "--thinking", "max"]
-    )
-
-    attached = track_session(
-      client,
-      client.attach_session(pi_session_ref(session_file: session_file, session_id: "sess-complex-model", cwd: tmpdir))
-    )
-
-    assert_includes stub_argv(stub).each_cons(2).to_a, ["--model", reference]
-    assert_includes stub_argv(stub).each_cons(2).to_a, ["--thinking", "high"]
-    assert_equal reference, attached.dig("session_settings", "model", "reference")
-    assert_nil attached.dig("metadata", "session_model_substitution")
-
-    prepared = client.prepare_interactive_session(attached)
-    assert_includes prepared.fetch("interactive_argv").each_cons(2).to_a, ["--model", reference]
-    assert_includes prepared.fetch("interactive_argv").each_cons(2).to_a, ["--thinking", "high"]
-    assert_equal reference, prepared.dig("session_ref", "session_settings", "model", "reference")
-
-    resumed = track_session(client, client.resume_dashboard_session(prepared.fetch("session_ref"), handoff: prepared.fetch("handoff")))
-    assert_includes stub_argv(stub).each_cons(2).to_a, ["--model", reference]
-    assert_equal reference, resumed.dig("session_settings", "model", "reference")
-  end
-
   def test_restore_prefers_recorded_live_model_over_a_mangled_assistant_model
     reference = "fireworks/fireworks:accounts/fireworks/models/glm-5p3"
     mangled_assistant = {
@@ -350,275 +292,82 @@ class HarnessPiClientTransportTest < HarnessIntegrationTest
     assert_equal reference, attached.dig("session_settings", "model", "reference")
   end
 
-  def test_prepare_interactive_session_aborts_and_settles_a_pending_tool_turn_before_handoff
-    progress = {
-      "type" => "message_end",
-      "message" => {
-        "role" => "assistant",
-        "content" => [{ "type" => "text", "text" => "Found the race in the ownership transfer." }]
-      }
-    }
+  def test_pi_focus_uses_the_existing_managed_session_view
     client, stub = build_pi_client(
       tmpdir,
-      stub_config: {
-        "session_id" => "sess-1",
-        "is_streaming" => true,
-        "startup_events" => [progress]
-      }
-    )
-    session_file = pi_session_file(tmpdir, session_id: "sess-1", completed: false)
-    ref = pi_session_ref(session_file: session_file, cwd: tmpdir)
-    ref.fetch("metadata")["interactive_handoff"] = {
-      "context" => {
-        "issue_id" => "P6-I24",
-        "issue_title" => "Coordinate native focus handoff",
-        "assignment" => "Preserve active work while changing focus ownership.",
-        "workspace_path" => tmpdir,
-        "workspace_branch" => "focus-handoff"
-      }
-    }
-    managed = client.attach_session(ref)
-    @harness_sessions << [client, managed]
-
-    prepared = client.prepare_interactive_session(managed)
-
-    assert_equal 1, stub_commands_of_type(stub, "abort").length
-    refute process_alive?(managed.fetch("pid")), "the settled RPC writer must exit before native focus launches"
-    assert_equal false, prepared.fetch("session_ref").fetch("is_streaming")
-    assert_nil prepared.fetch("session_ref").fetch("pid")
-    assert_equal true, prepared.dig("handoff", "was_streaming")
-    assert_equal true, prepared.dig("handoff", "continuation_required")
-    assert_equal false, prepared.dig("handoff", "exact_stream_transfer")
-    assert_equal "coordinated_turn_abort", prepared.dig("handoff", "transfer")
-    assert_equal "rpc_abort", prepared.dig("handoff", "interruption_method")
-    assert_equal "incomplete", prepared.dig("handoff", "turn_checkpoint", "state")
-    assert_equal "toolUse", prepared.dig("handoff", "turn_checkpoint", "stop_reason")
-    continuation = prepared.dig("handoff", "prompt")
-    assert_includes continuation, "P6-I24 — Coordinate native focus handoff"
-    assert_includes continuation, "Preserve active work while changing focus ownership."
-    assert_includes continuation, "Found the race in the ownership transfer."
-    assert_includes continuation, tmpdir
-    assert_equal continuation, prepared.fetch("interactive_argv").last
-    assert_includes prepared.fetch("interactive_argv").each_cons(2).to_a, ["--session", session_file]
-  end
-
-  def test_failed_active_turn_abort_leaves_the_managed_writer_and_ownership_untouched
-    client, stub = build_pi_client(
-      tmpdir,
-      stub_config: {
-        "session_id" => "sess-1",
-        "is_streaming" => true,
-        "fail_commands" => { "abort" => "tool cancellation refused" }
-      }
+      stub_config: { "session_id" => "sess-1", "is_streaming" => true }
     )
     session_file = pi_session_file(tmpdir, session_id: "sess-1", completed: false)
     managed = client.attach_session(pi_session_ref(session_file: session_file, cwd: tmpdir))
     @harness_sessions << [client, managed]
+    transcript_before = File.binread(session_file)
 
-    error = assert_raises(PiClient::RpcError) { client.prepare_interactive_session(managed) }
+    view = client.open_session_view(managed)
+    snapshot = view.snapshot
 
-    assert_includes error.message, "tool cancellation refused"
-    assert process_alive?(managed.fetch("pid")), "failed coordination must not terminate the active writer"
-    assert_equal 1, stub_commands_of_type(stub, "abort").length
-  end
-
-  def test_dashboard_return_automatically_continues_when_native_focus_has_no_new_final_result
-    client, stub = build_pi_client(tmpdir, stub_config: { "session_id" => "sess-1", "is_streaming" => true })
-    session_file = pi_session_file(tmpdir, session_id: "sess-1", completed: false)
-    managed = client.attach_session(pi_session_ref(session_file: session_file, cwd: tmpdir))
-    @harness_sessions << [client, managed]
-    prepared = client.prepare_interactive_session(managed)
-
-    resumed = client.resume_dashboard_session(prepared.fetch("session_ref"), handoff: prepared.fetch("handoff"))
-    @harness_sessions << [client, resumed]
-
-    prompts = stub_commands_of_type(stub, "prompt") + stub_commands_of_type(stub, "follow_up")
-    assert_equal [prepared.dig("handoff", "prompt")], prompts.map { |command| command.fetch("message") }
-    assert_equal true, resumed.fetch("is_streaming")
-    assert_equal "started", resumed.dig("metadata", "interactive_dashboard_continuation")
-  end
-
-  def test_dashboard_return_does_not_repeat_a_continuation_that_finished_in_native_focus
-    client, stub = build_pi_client(tmpdir, stub_config: { "session_id" => "sess-1", "is_streaming" => true })
-    session_file = pi_session_file(tmpdir, session_id: "sess-1", completed: false)
-    managed = client.attach_session(pi_session_ref(session_file: session_file, cwd: tmpdir))
-    @harness_sessions << [client, managed]
-    prepared = client.prepare_interactive_session(managed)
-    File.open(session_file, "a") do |file|
-      file.puts(JSON.generate(
-        "type" => "message",
-        "id" => "native-final",
-        "parentId" => "m2",
-        "timestamp" => "2026-01-01T00:00:03Z",
-        "message" => {
-          "role" => "assistant",
-          "content" => [{ "type" => "text", "text" => "Finished safely in native focus." }],
-          "stopReason" => "endTurn"
-        }
-      ))
-    end
-
-    resumed = client.resume_dashboard_session(prepared.fetch("session_ref"), handoff: prepared.fetch("handoff"))
-    @harness_sessions << [client, resumed]
-
+    assert client.managed_session_view_supported?
+    refute client.interactive_session_supported?
+    assert_equal "live", snapshot.fetch("availability")
+    assert_equal "streaming", snapshot.fetch("session_state")
+    assert_equal "sess-1", snapshot.fetch("session_id")
+    assert process_alive?(managed.fetch("pid")), "focus must leave the existing RPC process alive"
+    assert_empty stub_commands_of_type(stub, "abort")
     assert_empty stub_commands_of_type(stub, "prompt")
     assert_empty stub_commands_of_type(stub, "follow_up")
-    refute_equal "started", resumed.dig("metadata", "interactive_dashboard_continuation")
+    assert_equal transcript_before, File.binread(session_file), "focus must not append a session event"
+  ensure
+    view&.close
   end
 
-  def test_prepare_interactive_session_opens_a_settled_resumable_session_with_no_rpc_process
-    client, = build_pi_client(tmpdir)
-    session_file = pi_session_file(tmpdir, session_id: "settled-session", text: "Completed report")
-    ref = pi_session_ref(session_file: session_file, session_id: "settled-session", pid: nil, cwd: tmpdir)
+  def test_first_and_later_focus_views_keep_the_same_live_session_and_turn
+    client, stub = build_pi_client(
+      tmpdir,
+      stub_config: { "session_id" => "sess-1", "is_streaming" => true }
+    )
+    session_file = pi_session_file(tmpdir, session_id: "sess-1", completed: false)
+    managed = client.attach_session(pi_session_ref(session_file: session_file, cwd: tmpdir))
+    @harness_sessions << [client, managed]
+    pid = managed.fetch("pid")
 
-    prepared = client.prepare_interactive_session(ref)
+    first = client.open_session_view(managed)
+    first_snapshot = first.snapshot
+    first.close
+    later = client.open_session_view(managed)
+    later_snapshot = later.snapshot
 
-    assert_nil prepared.fetch("session_ref").fetch("pid")
-    assert_equal false, prepared.fetch("session_ref").fetch("is_streaming")
-    assert_equal true, prepared.dig("session_ref", "metadata", "interactive_rpc_already_stopped")
-    assert_equal "settled_session", prepared.dig("handoff", "transfer")
-    assert_equal true, prepared.dig("handoff", "exact_stream_transfer")
-    assert_nil prepared.dig("handoff", "prompt")
-    assert_includes prepared.fetch("interactive_argv").each_cons(2).to_a, ["--session", session_file]
+    assert_equal "sess-1", first_snapshot.fetch("session_id")
+    assert_equal first_snapshot.fetch("session_id"), later_snapshot.fetch("session_id")
+    assert_equal "streaming", first_snapshot.fetch("session_state")
+    assert_equal "streaming", later_snapshot.fetch("session_state")
+    assert process_alive?(pid), "opening either view must keep the in-flight turn alive"
+    assert_equal pid, client.get_state(managed).fetch("pid")
+    assert_empty stub_commands_of_type(stub, "abort")
+    assert_empty stub_commands_of_type(stub, "prompt")
+    assert_empty stub_commands_of_type(stub, "follow_up")
+  ensure
+    first&.close
+    later&.close
   end
 
-  def test_prepare_interactive_session_quiesces_a_settled_rpc_quickly_and_opens_the_same_session
-    client, stub = build_pi_client(tmpdir, stub_config: { "session_id" => "sess-1", "is_streaming" => false })
-    session_file = pi_session_file(tmpdir, session_id: "sess-1")
+  def test_legacy_focus_return_attaches_without_submitting_a_continuation
+    client, stub = build_pi_client(
+      tmpdir,
+      stub_config: { "session_id" => "sess-1", "is_streaming" => true }
+    )
+    session_file = pi_session_file(tmpdir, session_id: "sess-1", completed: false)
     managed = client.attach_session(pi_session_ref(session_file: session_file, cwd: tmpdir))
     @harness_sessions << [client, managed]
 
-    started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    prepared = client.prepare_interactive_session(managed)
-    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+    resumed = client.resume_dashboard_session(
+      managed,
+      handoff: { "handoff" => { "continuation_required" => true, "prompt" => "do not submit this" } }
+    )
 
-    assert_operator elapsed, :<, 0.75
-    assert_equal false, prepared.fetch("session_ref").fetch("is_streaming")
-    assert_nil prepared.fetch("session_ref").fetch("pid")
-    assert_equal true, prepared.dig("handoff", "exact_stream_transfer")
-    assert_equal "settled_session", prepared.dig("handoff", "transfer")
-    assert_nil prepared.dig("handoff", "prompt")
-    assert_includes prepared.fetch("interactive_argv").each_cons(2).to_a, ["--session", session_file]
-    refute_includes prepared.fetch("interactive_argv"), "--mode"
-    refute process_alive?(managed.fetch("pid")), "the RPC writer must be gone before the PTY launches"
+    assert_equal managed.fetch("pid"), resumed.fetch("pid")
+    assert_equal true, resumed.fetch("is_streaming")
     assert_empty stub_commands_of_type(stub, "abort")
-  end
-
-  def test_prepare_interactive_session_resolves_a_bare_pi_command_from_the_harness_path
-    stub = write_pi_stub(tmpdir, stub_config: { "session_id" => "sess-restricted" })
-    bin_dir = File.join(tmpdir, "restricted-bin")
-    pi_path = write_executable(
-      tmpdir,
-      "restricted-bin/pi",
-      "#!/bin/sh\nexec #{RUBY_BIN} #{stub.fetch("command").fetch(1)} \"$@\"\n"
-    )
-    client = PiClient.new(
-      command: "pi",
-      env: { "PATH" => bin_dir, "PI_STUB_CONFIG" => stub.fetch("env").fetch("PI_STUB_CONFIG") },
-      session_dir: File.join(tmpdir, "pi-sessions"),
-      command_timeout: 10,
-      event_timeout: 10,
-      shutdown_timeout: 1,
-      transport_ownership: build_transport_ownership(tmpdir)
-    )
-    # The app is intentionally launched with no inherited PATH. The only way to
-    # start Pi is the provider's effective environment supplied to the client.
-    with_env("PATH" => "") do
-      session_file = pi_session_file(tmpdir, session_id: "sess-restricted")
-      ref = pi_session_ref(session_file: session_file, cwd: tmpdir)
-      managed = client.attach_session(ref)
-      @harness_sessions << [client, managed]
-
-      prepared = client.prepare_interactive_session(managed)
-
-      assert_equal pi_path, prepared.fetch("interactive_executable")
-      assert_equal bin_dir, prepared.fetch("interactive_env").fetch("PATH")
-      assert_equal "pi", prepared.fetch("interactive_argv").first
-      assert_equal false, prepared.fetch("session_ref").fetch("is_streaming")
-    end
-  end
-
-  def test_prepare_interactive_session_preserves_the_inherited_path_that_started_rpc
-    stub = write_pi_stub(tmpdir, stub_config: { "session_id" => "sess-inherited" })
-    bin_dir = File.join(tmpdir, "inherited-bin")
-    pi_path = write_executable(
-      tmpdir,
-      "inherited-bin/pi",
-      "#!/bin/sh\nexec #{RUBY_BIN} #{stub.fetch("command").fetch(1)} \"$@\"\n"
-    )
-    client = PiClient.new(
-      command: "pi",
-      env: { "PI_STUB_CONFIG" => stub.fetch("env").fetch("PI_STUB_CONFIG") },
-      session_dir: File.join(tmpdir, "pi-sessions"),
-      command_timeout: 10,
-      event_timeout: 10,
-      shutdown_timeout: 1,
-      transport_ownership: build_transport_ownership(tmpdir)
-    )
-
-    with_env("PATH" => bin_dir) do
-      session_file = pi_session_file(tmpdir, session_id: "sess-inherited")
-      managed = client.attach_session(pi_session_ref(session_file: session_file, cwd: tmpdir))
-      @harness_sessions << [client, managed]
-
-      prepared = client.prepare_interactive_session(managed)
-
-      assert_equal pi_path, prepared.fetch("interactive_executable")
-      assert_equal bin_dir, prepared.fetch("interactive_env").fetch("PATH")
-    end
-  end
-
-  def test_prepare_interactive_session_reports_the_effective_path_when_pi_cannot_be_resolved
-    missing_path = File.join(tmpdir, "missing-bin")
-    client = PiClient.new(
-      command: "pi-not-installed",
-      env: { "PATH" => missing_path },
-      session_dir: File.join(tmpdir, "pi-sessions"),
-      command_timeout: 10,
-      event_timeout: 10,
-      shutdown_timeout: 1,
-      transport_ownership: build_transport_ownership(tmpdir)
-    )
-    session_file = pi_session_file(tmpdir, session_id: "sess-missing")
-
-    error = assert_raises(PiClient::Error) do
-      client.prepare_interactive_session(pi_session_ref(session_file: session_file, cwd: tmpdir))
-    end
-
-    assert_includes error.message, 'Pi command "pi-not-installed"'
-    assert_includes error.message, "PATH=#{missing_path.inspect}"
-    assert_includes error.message, "[harness.pi.env] PATH"
-  end
-
-  def test_prepare_interactive_session_rebuilds_a_replacement_jsonl_when_rpc_has_no_session_path
-    entry = {
-      "type" => "message",
-      "id" => "entry-1",
-      "parentId" => nil,
-      "timestamp" => "2026-01-01T00:00:01Z",
-      "message" => { "role" => "user", "content" => "preserve this request" }
-    }
-    client, = build_pi_client(
-      tmpdir,
-      stub_config: { "session_id" => nil, "is_streaming" => false, "entries" => [entry] }
-    )
-    source_file = pi_session_file(tmpdir, session_id: "source-session")
-    ref = pi_session_ref(session_file: source_file, session_id: nil, cwd: tmpdir)
-    managed = client.attach_session(ref)
-    @harness_sessions << [client, managed]
-    managed = managed.merge("session_id" => nil, "session_file" => nil)
-
-    prepared = client.prepare_interactive_session(managed)
-    replacement = prepared.dig("handoff", "replacement")
-
-    assert_equal "rpc_session_file_unavailable", replacement.fetch("reason")
-    assert_equal 1, replacement.fetch("entry_count")
-    assert_equal "preserve this request", replacement.fetch("latest_user_intent")
-    refute_includes prepared.fetch("interactive_argv"), "preserve this request"
-    replacement_lines = File.readlines(replacement.fetch("session_file"), chomp: true).map { |line| JSON.parse(line) }
-    assert_equal "session", replacement_lines.first.fetch("type")
-    assert_equal entry, replacement_lines.last
-    assert_includes prepared.fetch("interactive_argv").each_cons(2).to_a, ["--session", replacement.fetch("session_file")]
+    assert_empty stub_commands_of_type(stub, "prompt")
+    assert_empty stub_commands_of_type(stub, "follow_up")
   end
 
   def test_reclaim_interactive_session_only_signals_a_matching_orphaned_pi_process

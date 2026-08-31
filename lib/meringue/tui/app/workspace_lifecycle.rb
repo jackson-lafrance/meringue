@@ -48,7 +48,7 @@ module Meringue
         # released as soon as their result is applied, so never hand one to the
         # worker interactive-focus lifecycle.
         focus_mode = agent.fetch("type", nil) == "head" ? "none" : agent_workspace_focus_mode(agent)
-        native_focus = focus_mode != "none" && workspace_controller&.respond_to?(:open_workspace)
+        native_focus = %w[live_terminal handoff].include?(focus_mode) && workspace_controller&.respond_to?(:open_workspace)
         restored_view = if native_focus
                           "agent"
                         elsif @agent_workspace_agent_id.to_s == agent.fetch("id").to_s
@@ -93,7 +93,7 @@ module Meringue
         if agent.fetch("type", nil) != "head" && workspace_controller&.respond_to?(:open_workspace)
           rows, columns = agent_workspace_terminal_dimensions(state, embedded: native_focus)
           workspace_result = begin
-            if workspace_controller.respond_to?(:open_workspace_async) && focus_mode != "none"
+            if workspace_controller.respond_to?(:open_workspace_async) && native_focus
               @agent_workspace_open_pending = true
               @chat_mutex.synchronize { @agent_workspace_open_result = nil }
               workspace_controller.open_workspace_async(

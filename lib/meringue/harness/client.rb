@@ -212,14 +212,16 @@ module Meringue
         raise NotImplementedError, "harness clients must implement #live_terminal"
       end
 
-      # Native interactive mode is an optional harness capability. A capable client must settle an
-      # active managed turn through its supported cancellation boundary, preserve a continuation
-      # obligation when that turn has no final result, quiesce its managed transport, and only then
-      # return argv for the persisted session. It must never leave two session writers alive. The
-      # preparation result may also include `interactive_executable`, an absolute path resolved
-      # with provider-specific installation knowledge, and `interactive_shutdown_input`, bytes the
-      # harness needs before its focused process closes. Generic workspace code must not assume one
-      # backend's interrupt key. These values matter for app/GUI launches and safe handoff cleanup.
+      # A managed session view renders the existing transcript and routes user-submitted prompts
+      # through the existing transport. Focus is therefore only a view change: it starts no process,
+      # stops no turn, and submits no message.
+      def managed_session_view_supported?
+        false
+      end
+
+      # Native interactive mode is an optional legacy harness capability. It is suitable only when
+      # a backend can transfer its live transport without stopping an active turn or submitting a
+      # continuation. Generic workspace code must not assume one backend's interrupt key.
       def interactive_session_supported?
         false
       end
