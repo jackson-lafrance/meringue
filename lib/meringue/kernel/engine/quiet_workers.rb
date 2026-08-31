@@ -128,7 +128,10 @@ module Meringue
             next unless quiet_warning_candidate?(agent)
 
             metadata = agent.fetch("harness_metadata", {}) || {}
-            next if present_string(metadata[WORKER_QUIET_WARNING_MARKER_KEY])
+            # The marker is a durable fact, not a value to display. Treat any persisted marker
+            # as present so older snapshots (or a concurrent refresh that serialized it as false)
+            # cannot reopen the same quiet stretch and append another warning.
+            next if metadata.is_a?(Hash) && metadata.key?(WORKER_QUIET_WARNING_MARKER_KEY)
 
             quiet_seconds = worker_quiet_seconds(agent, now)
             next unless quiet_seconds && quiet_seconds >= threshold
