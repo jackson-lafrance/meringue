@@ -77,6 +77,25 @@ class SelfFixingWorkersTest < Minitest::Test
     refute Meringue::Experiments::SelfFixingWorkers.claimable?(worker)
   end
 
+  def test_focus_preparation_failure_alone_does_not_trigger_recovery
+    state = initial_state
+    worker = state.fetch("agents").first
+    worker["status"] = "blocked"
+    worker["harness_metadata"] = worker.fetch("harness_metadata").merge(
+      "last_interactive_handoff" => {
+        "state" => "failed",
+        "outcome" => "prepare_failed",
+        "error" => "No live agent process was available"
+      }
+    )
+    state.fetch("issues").first["status"] = "blocked"
+    @store.save(state)
+
+    refute Meringue::Experiments::SelfFixingWorkers.claimable?(worker)
+    assert_empty @engine.send(:reconcile_self_fixing_workers)
+    assert_empty @spawned
+  end
+
   private
 
   def initial_state

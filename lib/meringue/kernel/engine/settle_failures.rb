@@ -105,8 +105,45 @@ module Meringue
           "source" => "harness_turn_outcome",
           "stop_reason" => present_string(outcome.fetch("stop_reason", nil)),
           "error_message" => error_message,
+          "turn_ended_at" => present_string(outcome.fetch("turn_ended_at", nil)) ||
+                             present_string(outcome.fetch("ended_at", nil)),
           "last_assistant_text" => present_string(outcome.fetch("last_assistant_text", nil))
         }.compact
+      end
+
+      # A tool call can be the last durable record even though the worker's session remains
+      # available. That is incomplete work, not a failed worker: keep it idle and promptable.
+      def recoverable_incomplete_turn?(failure, agent)
+        return false unless failure.is_a?(Hash) && agent.is_a?(Hash)
+        return false unless agent.fetch("type", nil) == "worker"
+        return false unless agent_has_session_reference?(agent)
+
+        kind = failure.fetch("kind", nil).to_s
+        stop_reason = failure.fetch("stop_reason", nil).to_s
+        RECOVERABLE_INCOMPLETE_TURN_KINDS.include?(kind) || %w[toolUse tool_use].include?(stop_reason)
+      end
+
+      def incomplete_turn_already_recorded?(agent, failure)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        existing = metadata.is_a?(Hash) ? metadata.fetch("incomplete_turn", nil) : nil
+        existing.is_a?(Hash) && settle_failure_signature(existing) == settle_failure_signature(failure)
+      end
+
+      def incomplete_turn_status_reason(failure)
+        "#{failure.fetch("reason")}. Its agent session remains recoverable; prompt it to continue."
+      end
+
+      def clear_incomplete_turn!(agent)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        return unless metadata.is_a?(Hash)
+
+        incomplete = metadata.fetch("incomplete_turn", nil)
+        return unless incomplete.is_a?(Hash)
+
+        cleared = metadata.dup
+        cleared.delete("incomplete_turn")
+        cleared.delete("status_reason") if cleared.fetch("status_reason", nil) == incomplete_turn_status_reason(incomplete)
+        agent["harness_metadata"] = cleared
       end
 
       def settle_failure_from_events(events)

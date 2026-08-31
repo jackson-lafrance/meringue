@@ -264,6 +264,7 @@ module Meringue
           end
           current["harness_metadata"] = metadata
           clear_settle_failure!(current)
+          clear_incomplete_turn!(current)
           current["status"] = "working"
           current["updated_at"] = now
           refresh_worker_parent_statuses!(state, current, now)
@@ -363,6 +364,23 @@ module Meringue
       end
 
       def harness_process_gone_poll_result(agent, client, session_ref, error)
+        # A dead process can still leave a durable Pi assistant record. Prefer that record when it
+        # says a tool call stopped mid-turn; the session remains promptable even though its old RPC
+        # process cannot answer another request.
+        turn_outcome = safe_turn_outcome(client, session_ref)
+        turn_failure = settle_failure_from_turn_outcome(turn_outcome)
+        if recoverable_incomplete_turn?(turn_failure, agent)
+          return {
+            "agent_id" => agent.fetch("id", nil),
+            "agent_type" => "worker",
+            "state" => "settle_failed",
+            "session_ref" => session_ref,
+            "events" => safe_read_events(client, session_ref),
+            "last_assistant_text" => nil,
+            "settle_failure" => turn_failure
+          }
+        end
+
         # Recorded evidence underneath, fresh evidence on top: a client that can still describe the
         # exit wins, and one that cannot (a restart, a session this process never owned) falls back
         # to what the record already says instead of re-wording the same failure.

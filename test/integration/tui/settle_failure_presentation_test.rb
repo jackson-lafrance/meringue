@@ -69,6 +69,28 @@ class TuiSettleFailurePresentationTest < Minitest::Test
     assert_includes rendered, "stopped mid-turn"
   end
 
+  def test_a_pending_tool_call_says_the_worker_can_be_continued
+    worker = agent_record(
+      "P1-I1-W1",
+      "issue_id" => "P1-I1",
+      "project_id" => "P1",
+      "status" => "idle",
+      "harness_metadata" => {
+        "title" => "Continue the task",
+        "incomplete_turn" => {
+          "kind" => "pending_tool_call",
+          "reason" => "its last turn stopped while a tool call was still pending"
+        },
+        "status_reason" => "its last turn stopped while a tool call was still pending. Its agent session remains recoverable; prompt it to continue."
+      }
+    )
+
+    row = worker_row(worker)
+
+    assert_includes row, TreePane::STATUS_DOTS.fetch("idle")
+    assert_includes row, "stopped: tool call pending"
+  end
+
   # A session the provider refuses to replay is not something a prompt picks up where it left off,
   # so the row must not read like the resumable case.
   def test_a_worker_whose_session_cannot_be_replayed_says_the_session_is_unusable

@@ -10,7 +10,7 @@ agent_defaults_mode = "role-specific"   # shared | role-specific | guided
 
 ## Self-fixing workers
 
-`self_fixing_workers` watches worker records that settle as `errored` or `blocked`. For each eligible worker it can claim at most one recovery attempt and start a follow-up worker on the same issue and workspace lineage. The recovery prompt asks the worker to diagnose the failure and make the smallest safe correction.
+`self_fixing_workers` watches worker records that settle as `errored` or `blocked`. For each eligible worker it can claim at most one recovery attempt and start a follow-up worker on the same issue and workspace lineage. The recovery prompt asks the worker to diagnose the failure and make the smallest safe correction. A focus-preparation failure marker alone is not a worker failure, so it never starts self-fixing recovery; a separate settle failure remains eligible.
 
 Safety is durable rather than process-local:
 

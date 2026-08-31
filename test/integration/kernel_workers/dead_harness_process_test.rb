@@ -60,6 +60,19 @@ class KernelWorkersDeadHarnessProcessTest < Minitest::Test
     undef_method :session_exit_evidence
   end
 
+  class PendingToolCallDeadProcessHarnessClient < DeadProcessHarnessClient
+    attr_accessor :outcome
+
+    def initialize(outcome:, **options)
+      super(**options)
+      @outcome = outcome
+    end
+
+    def turn_outcome(_session_ref)
+      outcome
+    end
+  end
+
   EXIT_EVIDENCE = {
     "pid" => 27_282,
     "exit_status" => { "exit_code" => 1, "termsig" => nil, "success" => false },
@@ -115,6 +128,33 @@ class KernelWorkersDeadHarnessProcessTest < Minitest::Test
     refute_nil settle_log, "the user needs one visible line saying the process exited"
     assert_includes settle_log.fetch("message"), "its agent session process exited before it produced a result (exit code 1)"
     assert_includes settle_log.fetch("message"), "prompting this worker continues it in a new agent process"
+  end
+
+  def test_a_dead_process_with_pending_tool_evidence_keeps_the_worker_recoverable
+    outcome = {
+      "state" => "incomplete",
+      "kind" => "pending_tool_call",
+      "reason" => "its last turn stopped while a tool call was still pending",
+      "stop_reason" => "toolUse"
+    }
+    client = PendingToolCallDeadProcessHarnessClient.new(
+      provider: "pi",
+      outcome: outcome,
+      exit_evidence: EXIT_EVIDENCE
+    )
+    client.last_assistant_text = "I started the tool call."
+    client.events = [{ "type" => "process_exit", "pid" => 27_282, "status" => { "exit_code" => 1 } }]
+    engine, context, worker_id = build_worker(client)
+
+    result = apply!(engine, "ReconcileSessions", {})
+    worker = agent(engine, worker_id)
+
+    assert_equal "recoverable", result.dig("result", "poll_results").first.fetch("state")
+    assert_equal "idle", worker.fetch("status")
+    assert_equal "pending_tool_call", worker.dig("harness_metadata", "incomplete_turn", "kind")
+    assert_nil worker.dig("harness_metadata", "settle_failure")
+    assert_equal "working", issue(engine, context.fetch("issue_id")).fetch("status")
+    assert_empty client.attaches
   end
 
   # The failure the user reads must be the process exit, never the downstream RPC timeout a replayed

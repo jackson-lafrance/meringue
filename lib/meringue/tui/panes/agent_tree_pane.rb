@@ -962,10 +962,16 @@ module Meringue
           "#{[attempts + 1, limit].min}/#{limit}"
         end
 
-        # An errored worker whose turn died mid-flight reads differently from one that failed its
-        # work, so the row says so instead of only showing the error dot.
+        # A worker whose turn died mid-flight reads differently from one that failed its work, so
+        # the row says so instead of only showing the status dot.
         def unfinished_marker(worker)
           metadata = worker.is_a?(Hash) ? (worker["harness_metadata"] || {}) : {}
+          incomplete = metadata.is_a?(Hash) ? metadata["incomplete_turn"] : nil
+          if incomplete.is_a?(Hash)
+            return "stopped: tool call pending" if %w[pending_tool_call interrupted_tool_call].include?(incomplete["kind"].to_s)
+
+            return "stopped mid-turn"
+          end
           return "" unless metadata.is_a?(Hash) && metadata["settle_failure"].is_a?(Hash)
 
           case metadata["settle_failure"]["kind"].to_s
