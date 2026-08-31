@@ -139,6 +139,30 @@ class HarnessPiClientTurnOutcomeTest < HarnessIntegrationTest
     assert_equal "finished while focused", outcome.fetch("last_assistant_text")
   end
 
+  def test_interactive_outcome_preserves_a_final_report_beyond_the_4000_byte_boundary
+    path = pi_session_file(tmpdir)
+    ref = pi_session_ref(session_file: path)
+    checkpoint = client.turn_outcome(ref)
+    handoff = { "handoff" => { "turn_checkpoint" => checkpoint } }
+    report = "REPORT START\n#{"finding\n" * 1_000}REPORT END"
+
+    File.open(path, "a") do |file|
+      file.puts user_line
+      file.puts assistant_line(
+        stop_reason: "endTurn",
+        text: report,
+        id: "m11",
+        parent_id: "m10",
+        timestamp: "2026-01-01T00:07:00Z"
+      )
+    end
+
+    outcome = client.interactive_turn_outcome(ref, handoff: handoff)
+
+    assert_equal report, outcome.fetch("last_assistant_text")
+    assert_operator report.bytesize, :>, 4_000
+  end
+
   def test_a_previous_turn_result_is_not_used_after_a_new_prompt_without_a_result
     path = pi_session_file(tmpdir, extra_lines: [user_line])
     ref = pi_session_ref(session_file: path)
