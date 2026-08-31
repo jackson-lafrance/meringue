@@ -216,9 +216,19 @@ module Meringue
         project = find_project(state, project_id)
         return rejected_result(command_id, command_type, "Project #{project_id} does not exist.", ["project_not_found"]) unless project
 
-        now = timestamp
         previous_name = project.fetch("name", "")
-        project["name"] = project_display_name(name) || name.to_s.strip
+        requested_name = project_display_name(name) || name.to_s.strip
+
+        # A rename to the name the project already has changes nothing, and saying
+        # "Renamed project P1: Meringue -> Meringue" reads as a rename that failed to
+        # take: that message is what made a user believe a stuck row was the rename's
+        # fault. Report the no-op honestly and leave the record, including its
+        # updated_at, untouched. Case is compared exactly, because "meringue" ->
+        # "Meringue" is a real rename even though the two names collide for uniqueness.
+        return no_op_rename_result(command_id, command_type, state, project, requested_name) if requested_name == previous_name
+
+        now = timestamp
+        project["name"] = requested_name
         project["updated_at"] = now
         log_ids = append_log(
           state,
@@ -236,6 +246,23 @@ module Meringue
         store.save(state)
 
         accepted_result(command_id, command_type, project.fetch("id"), "Renamed project #{project.fetch("id")}.", project, log_ids)
+      end
+
+      # The no-op is still logged, because the user asked for a rename where they read the
+      # log, and an unanswered command is exactly what "stuck" looks like.
+      def no_op_rename_result(command_id, command_type, state, project, name)
+        project_id = project.fetch("id")
+        message = "Project #{project_id} is already named #{name}; nothing was changed."
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: project_id,
+          level: "info",
+          message: message,
+          details: { "changed_fields" => [], "name" => name }
+        )
+        store.save(state)
+        accepted_result(command_id, command_type, project_id, message, project, log_ids)
       end
 
       def create_issue(command_id, command_type, payload)
