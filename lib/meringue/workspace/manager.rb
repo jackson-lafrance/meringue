@@ -859,7 +859,8 @@ module Meringue
           return cleanup_outcome("failed", "worktree_locked", success: false, **base)
         end
 
-        if Dir.exist?(worktree_root)
+        worktree_missing = !Dir.exist?(worktree_root)
+        if !worktree_missing
           dirty = run_command("git", "-C", worktree_root, "status", "--porcelain", "--untracked-files=all", deadline: deadline)
           unless dirty.fetch("status").success?
             return cleanup_outcome(
@@ -910,7 +911,8 @@ module Meringue
 
         owner_id = workspace["workspace_owner_id"] || plan["workspace_owner_id"]
         release_workspace_owner(worktree_root, agent_id: owner_id, git_root: git_root, branch: branch) if owner_id
-        cleanup_outcome("removed", "worktree_removed", success: true, attempted: true, **base)
+        details = worktree_missing ? { worktree_missing: true } : {}
+        cleanup_outcome("removed", "worktree_removed", success: true, attempted: true, **details, **base)
       rescue CommandTimeout => e
         cleanup_outcome(
           "failed",

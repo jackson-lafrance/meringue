@@ -282,20 +282,25 @@ module Meringue
         }
       end
 
-      # Reconciliation removes killed records with the same helper `/prune` uses, so it also lost
-      # the per-worker "Removed managed worktree" line. It reports the same consolidated counts
-      # instead, which keeps the filesystem side effect visible without spending a line per worker.
-      # It stays silent when the pass removed nothing (a killed record whose worktree is still
-      # dirty is retried every tick and already warns), so this never becomes tick noise.
+      # Reconciliation removes killed records with the same helper `/prune` uses, so one reconcile
+      # pass is one line, shaped like a prune pass: consolidated counts that keep the filesystem
+      # side effect visible without spending a line per worker, plus the same preserved-worktree
+      # sentence (at `warning`) when cleanup had to keep a worktree, so a retention is never silent
+      # now that no per-worker warning follows it. It stays silent when the pass removed nothing, so
+      # a killed record whose worktree is still dirty never becomes tick noise.
       def append_killed_records_prune_log(state, prune_result)
         return [] if prune_removed_counts(prune_result).values.sum.zero?
 
+        blocked = Array(prune_result.fetch("workspace_cleanup_outcomes", []))
+                  .reject { |outcome| outcome.fetch("success", false) }
+        message = prune_summary_message(prune_result, prefix: "Pruned killed records:")
+        message = "#{message} #{blocked_worktree_retention_sentence(blocked)}" if blocked.any?
         append_log(
           state,
           source_type: "kernel",
           source_id: nil,
-          level: "info",
-          message: prune_summary_message(prune_result, prefix: "Pruned killed records:"),
+          level: blocked.any? ? "warning" : "info",
+          message: message,
           details: prune_result
         )
       end

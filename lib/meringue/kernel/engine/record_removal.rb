@@ -121,7 +121,8 @@ module Meringue
           "released_head_session_agent_ids" => released_head_ids,
           "workspace_cleanup_outcomes" => workspace_cleanups,
           "removed_worktree_agent_ids" => workspace_cleanups.filter_map do |outcome|
-            outcome.fetch("agent_id", nil) if outcome.fetch("status", nil) == "removed"
+            outcome.fetch("agent_id", nil) if outcome.fetch("status", nil) == "removed" &&
+                                                 !outcome.fetch("worktree_missing", false)
           end,
           "workspace_cleanup_blocked_agent_ids" => cleanup_blocked_worker_ids,
           "workspace_cleanup_blocked_issue_ids" => cleanup_blocked_issue_ids,
@@ -148,7 +149,7 @@ module Meringue
 
           metadata = worker.fetch("harness_metadata", {}) || {}
           worker["harness_metadata"] = metadata.merge("workspace_cleanup" => outcome.reject { |key, _value| key == "log_entry_ids" })
-          outcome.merge("log_entry_ids" => append_workspace_cleanup_log(state, worker, outcome))
+          outcome.merge("log_entry_ids" => [])
         end
       end
 
@@ -166,7 +167,14 @@ module Meringue
         end
       end
 
-      def cleanup_pruned_worker_workspaces!(state, worker_ids, now, append_logs: true, deadline: nil)
+      # Cleanup writes no log lines of its own, whatever the outcome. A retained worktree used to
+      # cost a "could not be removed" warning per worker on top of the pass summary, which names
+      # every one of them again - N+1 entries for one pass, saying the same thing. The pass summary
+      # (prune, kill, and the killed-record reconcile all share its shape) is the single line. The
+      # per-worker outcome is not lost: it is written to the worker's `harness_metadata.workspace_cleanup`
+      # before the record is removed, and returned here for the pass's `workspace_cleanup_outcomes`,
+      # which the summary log details and the command result both carry.
+      def cleanup_pruned_worker_workspaces!(state, worker_ids, now, deadline: nil)
         pruned_ids = Array(worker_ids).compact
         Array(worker_ids).filter_map do |agent_id|
           worker = find_agent(state, agent_id)
@@ -230,8 +238,7 @@ module Meringue
             "checked_at" => now
           )
           worker["harness_metadata"] = (worker.fetch("harness_metadata", {}) || {}).merge("workspace_cleanup" => outcome)
-          log_ids = append_logs ? append_workspace_cleanup_log(state, worker, outcome) : []
-          outcome.merge("log_entry_ids" => log_ids)
+          outcome.merge("log_entry_ids" => [])
         rescue StandardError => e
           outcome = {
             "agent_id" => agent_id,
@@ -245,8 +252,7 @@ module Meringue
             "checked_at" => now
           }.compact
           worker["harness_metadata"] = (worker.fetch("harness_metadata", {}) || {}).merge("workspace_cleanup" => outcome) if worker
-          log_ids = worker && append_logs ? append_workspace_cleanup_log(state, worker, outcome) : []
-          outcome.merge("log_entry_ids" => log_ids)
+          outcome.merge("log_entry_ids" => [])
         end
       end
 
@@ -369,32 +375,6 @@ module Meringue
           "worktree_provider_cwd" => inner["worktree_provider_cwd"],
           "project_root" => inner["project_root"]
         }.compact
-      end
-
-      # Only cleanups the user may have to act on get their own line. A successful removal (or a
-      # confirmation that the worktree was already gone, or a workspace that was never a managed
-      # worktree) is counted by the pass summary instead, so one prune of five workers is one log
-      # line rather than six. The per-worker outcome is not lost: it is written to the worker's
-      # `harness_metadata.workspace_cleanup` and returned in the pass's `workspace_cleanup_outcomes`,
-      # which the prune log details and the command result both carry.
-      def append_workspace_cleanup_log(state, worker, outcome)
-        return [] if outcome.fetch("success", false)
-        return [] if outcome.fetch("status", "failed") == "skipped"
-
-        message = "Pruned worker #{worker.fetch("id")} but its managed worktree could not be removed; " \
-                  "preserving it for safety: #{outcome.fetch("reason", "unknown_error")}."
-        append_log(
-          state,
-          source_type: "kernel",
-          source_id: worker.fetch("id"),
-          level: "warning",
-          message: message,
-          details: outcome.merge(
-            "agent_id" => worker.fetch("id"),
-            "issue_id" => worker.fetch("issue_id", nil),
-            "project_id" => worker.fetch("project_id", nil)
-          ).compact
-        )
       end
 
       def clear_dangling_issue_routing_pointer!(issue, removed_agent_ids, now)
