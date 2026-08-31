@@ -124,10 +124,18 @@ module Meringue
         synchronized_state do
           state = normalized_state
           now = timestamp
+          changed = false
           results = state.fetch("agents").filter_map do |agent|
-            next unless quiet_warning_candidate?(agent)
+            next unless agent.is_a?(Hash) && agent.fetch("type", nil) == "worker"
 
             metadata = agent.fetch("harness_metadata", {}) || {}
+            unless quiet_warning_candidate?(agent)
+              if metadata.is_a?(Hash) && metadata.delete(WORKER_QUIET_WARNING_MARKER_KEY)
+                changed = true
+              end
+              next
+            end
+
             # The marker is a durable fact, not a value to display. Treat any persisted marker
             # as present so older snapshots (or a concurrent refresh that serialized it as false)
             # cannot reopen the same quiet stretch and append another warning.
@@ -136,9 +144,10 @@ module Meringue
             quiet_seconds = worker_quiet_seconds(agent, now)
             next unless quiet_seconds && quiet_seconds >= threshold
 
+            changed = true
             record_quiet_worker_warning!(state, agent, quiet_seconds, now)
           end
-          next results if results.empty?
+          next results unless changed
 
           touch_state!(state, now)
           store.save(state)
