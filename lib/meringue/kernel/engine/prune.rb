@@ -125,7 +125,6 @@ module Meringue
           preparation.fetch("state"),
           preparation.fetch("worker_ids"),
           preparation.fetch("claimed_at"),
-          append_logs: false,
           deadline: deadline
         )
       end
@@ -523,8 +522,15 @@ module Meringue
           "post_prune_retry" => true
         }.compact
 
+        # Not every blocked outcome carries a full workspace identity. `branch_not_delivery_managed`,
+        # for one, is decided before the manager ever resolves a git root, so its outcome has no
+        # `git_root` to retry with. That absence is a property of the retry input, not a new fact
+        # about the worktree: reporting it as its own reason ("cleanup_blocked_missing_path") used to
+        # contradict the pass, which had just named the real reason for the same worktree. Keep the
+        # original reason and record separately that the retry could not run.
         unless worktree_root && branch && git_root
-          return base.merge("status" => "failed", "reason" => "cleanup_blocked_missing_path",
+          return base.merge("status" => "failed", "reason" => original_reason,
+                            "retry_skipped" => "incomplete_workspace_identity",
                             "success" => false, "attempted" => false)
         end
 
@@ -587,30 +593,36 @@ module Meringue
         }
       end
 
+      # The retry can only revisit worktrees the pass already reported as preserved, so it never has
+      # new retention to announce - only recovery. Its message therefore reports recovery alone; the
+      # retention stays named exactly once, in the pass summary.
       def post_prune_cleanup_log_message(summary, source:)
         removed = summary.fetch("removed_count")
-        retained = summary.fetch("retained_count")
+        confirmed = summary.fetch("already_removed_count")
         parts = []
-        if removed.positive?
-          parts << "Post-prune cleanup removed #{count_phrase(removed, "worktree")} the #{source} pass left behind"
-        end
-        if retained.positive?
-          listed = Array(summary.fetch("retained")).first(PRUNE_RETENTION_REPORT_LIMIT).map do |item|
-            "#{item.fetch("agent_id", "worker")} (#{item.fetch("reason", "unknown")})"
-          end
-          remainder = retained - listed.length
-          listed << "and #{remainder} more" if remainder.positive?
-          parts << "retained #{count_phrase(retained, "worktree")} because cleanup was not safe: #{listed.join(", ")}"
-        end
-        parts.empty? ? "Post-prune cleanup found nothing to revisit." : "#{parts.join("; ")}."
+        parts << "removed #{count_phrase(removed, "worktree")}" if removed.positive?
+        parts << "confirmed #{count_phrase(confirmed, "worktree")} already gone" if confirmed.positive?
+        "Post-prune cleanup #{parts.join(" and ")} the #{source} pass left behind."
+      end
+
+      # A retry that recovered nothing has nothing to add: the pass summary already named every
+      # preserved worktree and its reason, so logging here would render the same retention a second
+      # time. The outcomes are still returned in the command result's `post_prune_cleanup` details.
+      def post_prune_cleanup_reportable?(summary)
+        summary.fetch("removed_count").positive? || summary.fetch("already_removed_count").positive?
       end
 
       def append_post_prune_cleanup_log(state, outcomes, summary:, source:)
+        return [] unless post_prune_cleanup_reportable?(summary)
+
+        # This entry reports recovery only. Anything still retained was already reported at
+        # `warning` by the pass summary, so a warning here would attach that level to a sentence
+        # that reads as pure success. `summary["level"]` keeps the retention level for the details.
         append_log(
           state,
           source_type: "kernel",
           source_id: nil,
-          level: summary.fetch("level"),
+          level: "info",
           message: post_prune_cleanup_log_message(summary, source: source),
           details: {
             "kind" => "post_prune_cleanup",
@@ -628,17 +640,8 @@ module Meringue
       def append_post_prune_cleanup_message(message, summary)
         removed = summary.fetch("removed_count")
         return message unless removed.positive?
-        retained = summary.fetch("retained_count")
-        suffix = "Post-prune cleanup removed #{count_phrase(removed, "worktree")} the pass left behind"
-        if retained.positive?
-          listed = Array(summary.fetch("retained")).first(PRUNE_RETENTION_REPORT_LIMIT).map do |item|
-            "#{item.fetch("agent_id", "worker")} (#{item.fetch("reason", "unknown")})"
-          end
-          remainder = retained - listed.length
-          listed << "and #{remainder} more" if remainder.positive?
-          suffix += "; retained #{count_phrase(retained, "worktree")} because cleanup was not safe: #{listed.join(", ")}"
-        end
-        "#{message} #{suffix}."
+
+        "#{message} Post-prune cleanup removed #{count_phrase(removed, "worktree")} the pass left behind."
       end
 
       # One prune pass is one visible line. The counts cover every record class the pass touched:
@@ -673,7 +676,8 @@ module Meringue
         return Array(recorded) if recorded
 
         Array(prune_result.fetch("workspace_cleanup_outcomes", [])).filter_map do |outcome|
-          outcome.fetch("agent_id", nil) if outcome.fetch("status", nil) == "removed"
+          outcome.fetch("agent_id", nil) if outcome.fetch("status", nil) == "removed" &&
+                                               !outcome.fetch("worktree_missing", false)
         end
       end
 
@@ -726,15 +730,7 @@ module Meringue
           sentences << "Retained #{count_phrase(successor_retentions.length, "issue")} because a worker that " \
                        "continues their work is still running: #{listed.join(", ")}."
         end
-        if blocked_cleanups.any?
-          listed = blocked_cleanups.first(PRUNE_RETENTION_REPORT_LIMIT).map do |outcome|
-            "#{outcome.fetch("agent_id", "worker")} (#{outcome.fetch("reason", "unknown_error")})"
-          end
-          remainder = blocked_cleanups.length - listed.length
-          listed << "and #{remainder} more" if remainder.positive?
-          sentences << "Preserved #{count_phrase(blocked_cleanups.length, "managed worktree")} because cleanup was not safe: " \
-                       "#{listed.join(", ")}."
-        end
+        sentences << blocked_worktree_retention_sentence(blocked_cleanups) if blocked_cleanups.any?
 
         {
           "retained_issue_ids" => reasons.filter_map { |reason| reason.fetch("issue_id") },
@@ -763,6 +759,19 @@ module Meringue
         format("%g", Float(value))
       rescue ArgumentError, TypeError
         value.to_s
+      end
+
+      # The one place a preserved-worktree retention is rendered. Every pass that removes worker
+      # records (prune, kill, the killed-record reconcile) appends this sentence to its own summary
+      # line, so a retention is named once per pass and reads correctly on its own.
+      def blocked_worktree_retention_sentence(blocked)
+        listed = Array(blocked).first(PRUNE_RETENTION_REPORT_LIMIT).map do |outcome|
+          "#{outcome.fetch("agent_id", "worker")} (#{outcome.fetch("reason", "unknown_error")})"
+        end
+        remainder = Array(blocked).length - listed.length
+        listed << "and #{remainder} more" if remainder.positive?
+        "Preserved #{count_phrase(Array(blocked).length, "managed worktree")} because cleanup was not safe: " \
+          "#{listed.join(", ")}."
       end
 
       def count_phrase(count, noun)

@@ -176,15 +176,7 @@ module Meringue
           clauses << "Retained #{count_phrase(retained.length, "managed worktree")} because another agent is still " \
                      "using it: #{descriptions.join(", ")}."
         end
-        if blocked.any?
-          listed = blocked.first(PRUNE_RETENTION_REPORT_LIMIT).map do |outcome|
-            "#{outcome.fetch("agent_id", "worker")} (#{outcome.fetch("reason", "unknown_error")})"
-          end
-          remainder = blocked.length - listed.length
-          listed << "and #{remainder} more" if remainder.positive?
-          clauses << "Preserved #{count_phrase(blocked.length, "managed worktree")} because cleanup was not safe: " \
-                     "#{listed.join(", ")}."
-        end
+        clauses << blocked_worktree_retention_sentence(blocked) if blocked.any?
         clauses.empty? ? "" : clauses.join(" ")
       end
 

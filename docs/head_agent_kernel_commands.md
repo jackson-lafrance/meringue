@@ -1582,7 +1582,10 @@ One pass, one line:
 
 - The summary is a single log entry shaped `Pruned N issues, M agents, K worktrees, and P projects.` The agent count is every agent record the pass removed (workers bundled with a removed issue, the heads removed with them, and standalone errored heads), not just the standalone ones. The worktree count is the managed worktrees actually deleted from disk; a worktree that was already gone is reported in the details, not in the count.
 - Retention sentences are appended to that same line, so `/prune` stays one visible line even when it retains records.
-- The killed-record cleanup inside `ReconcileSessions` reports the same counts with a `Pruned killed records:` prefix, and only when it actually removed something.
+- The killed-record cleanup inside `ReconcileSessions` reports the same counts with a `Pruned killed records:` prefix, and only when it actually removed something. It appends the same preserved-worktree sentence and rises to `warning` when cleanup had to preserve one.
+- A preserved worktree never costs a line of its own. N retained worktrees are named once, in that summary sentence; the per-worker outcome stays in the entry's `workspace_cleanup_outcomes` details and in each worker's `harness_metadata.workspace_cleanup`, written before the record is removed.
+- The post-commit cleanup retry adds a second line only when it actually recovered something (`Post-prune cleanup removed 1 worktree the prune pass left behind.`). A retry that recovered nothing writes no line: the retention it would describe was already named by the pass, and re-rendering it produced a contradictory duplicate. The retry can only revisit worktrees the pass already preserved, so it never has new retention to report; its outcomes stay in the result's `post_prune_cleanup` details.
+- A blocked outcome that carries no git root (`branch_not_delivery_managed` is decided before the manager resolves one) cannot be retried at all. The retry keeps the reason the pass reported and records `retry_skipped: "incomplete_workspace_identity"` instead of inventing a second reason for the same worktree.
 
 Why a record was retained or a worktree was preserved is always reported:
 
@@ -1595,7 +1598,7 @@ Worktree cleanup safety and outcomes:
 - The persisted worktree path must still be registered to the persisted managed branch in the expected repository and must not be the main checkout or overlap a path referenced by another worker. Legacy prefixed branch names remain recognizable for safe upgrade cleanup but are never generated for new work.
 - Clean, unlocked worktrees are removed with `git worktree remove` **without** `--force`. The branch is not deleted.
 - A missing but still-registered worktree is safely deregistered. A worktree already absent from both disk and git's registry is an idempotent success.
-- Dirty, locked, ambiguous, or failed cleanups leave the worktree and branch untouched, and each one is logged individually at `warning`; the eligible issue/worker records still leave state. Successful cleanups are counted by the pass summary instead of getting a line each. Every attempted worker stores its latest `harness_metadata.workspace_cleanup` result before removal, and the `Prune` result and log details expose `workspace_cleanup_outcomes`, `removed_worktree_agent_ids`, and the cleanup-blocked agent/issue/project IDs.
+- Dirty, locked, ambiguous, or failed cleanups leave the worktree and branch untouched, and are named together in the pass summary, which is logged at `warning`; the eligible issue/worker records still leave state. Successful cleanups are counted by the pass summary too, so one pass of five workers is one line rather than six. Every attempted worker stores its latest `harness_metadata.workspace_cleanup` result before removal, and the `Prune` result and log details expose `workspace_cleanup_outcomes`, `removed_worktree_agent_ids`, and the cleanup-blocked agent/issue/project IDs.
 
 PR checks are conservative and bounded. The kernel performs them outside the state lock,
 looks up each URL once, seeds the cache with pull requests already recorded as merged, and

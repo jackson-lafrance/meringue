@@ -141,9 +141,10 @@ class KernelWorkersKillWorktreeCleanupTest < Minitest::Test
     refute_nil summary, "the kill log warns that the worktree was preserved"
     assert_equal "warning", summary.fetch("level")
     assert_includes summary.fetch("message"), "worktree_dirty"
-    warning = state.fetch("logs").find { |log| log.fetch("source_id", nil) == "P1-I1-W1" && log.fetch("level") == "warning" }
-    refute_nil warning
-    assert_equal "worktree_dirty", warning.dig("details", "reason")
+    # The preserved worktree is named once, by the kill summary. The per-worker detail lives in
+    # that entry's structured outcomes rather than a warning line of its own.
+    assert_empty state.fetch("logs").select { |log| log.fetch("message").include?("could not be removed") }
+    assert_equal "worktree_dirty", summary.dig("details", "workspace_cleanup_outcomes", 0, "reason")
   end
 
   def test_killing_a_worker_with_a_locked_worktree_preserves_it

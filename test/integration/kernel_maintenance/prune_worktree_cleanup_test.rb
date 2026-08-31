@@ -107,6 +107,25 @@ class KernelMaintenancePruneWorktreeCleanupTest < Minitest::Test
     assert_equal "worktree_already_removed", summary.dig("details", "workspace_cleanup_outcomes", 0, "reason")
   end
 
+  def test_missing_registered_worktree_is_deregistered_without_retention_warning
+    project, workspace = managed_project_and_workspace(task_title: "Missing cleanup")
+    FileUtils.rm_rf(workspace.fetch("worktree_root_path"))
+    write_managed_worker_state(project, workspace)
+
+    result = apply_command(build_engine, "Prune", {})
+
+    cleanup = result.dig("result", "workspace_cleanup_outcomes", 0)
+    assert_equal "removed", cleanup.fetch("status")
+    assert cleanup.fetch("success")
+    assert_equal "worktree_removed", cleanup.fetch("reason")
+    assert cleanup.fetch("worktree_missing"), "a missing registered path is safely deregistered"
+    assert_equal "Pruned 1 issue, 1 agent, 0 worktrees, and 0 projects.", result.fetch("message")
+    state = read_state
+    assert_equal 1, state.fetch("logs").length
+    assert_equal "info", state.fetch("logs").first.fetch("level")
+    assert_empty state.fetch("logs").select { |log| log.fetch("message").include?("Preserved") }
+  end
+
   def test_dirty_worktree_is_preserved_while_eligible_records_are_pruned
     project, workspace = managed_project_and_workspace(task_title: "Dirty cleanup")
     unfinished = File.join(workspace.fetch("workspace_path"), "unfinished.txt")
@@ -125,9 +144,10 @@ class KernelMaintenancePruneWorktreeCleanupTest < Minitest::Test
     state = read_state
     assert_empty state.fetch("issues")
     assert_empty state.fetch("agents")
-    warning = state.fetch("logs").find { |log| log.fetch("message").include?("could not be removed") }
-    assert_equal "warning", warning.fetch("level")
-    assert_equal "worktree_dirty", warning.dig("details", "reason")
+    assert_equal 1, state.fetch("logs").length, "one prune pass writes one line"
+    summary = state.fetch("logs").first
+    assert_equal "warning", summary.fetch("level")
+    assert_equal "worktree_dirty", summary.dig("details", "workspace_cleanup_outcomes", 0, "reason")
     assert Dir.exist?(workspace.fetch("worktree_root_path")), "a dirty worktree must never be forced away"
   end
 
@@ -166,9 +186,11 @@ class KernelMaintenancePruneWorktreeCleanupTest < Minitest::Test
     state = read_state
     assert_empty state.fetch("issues")
     assert_empty state.fetch("agents")
-    warning = state.fetch("logs").find { |log| log.fetch("source_id", nil) == "P1-I1-W1" }
-    assert_equal "warning", warning.fetch("level")
-    assert_equal "worktree_branch_mismatch", warning.dig("details", "reason")
+    assert_equal 1, state.fetch("logs").length, "one prune pass writes one line"
+    summary = state.fetch("logs").first
+    assert_equal "warning", summary.fetch("level")
+    assert_nil summary.fetch("source_id", nil), "the retention is reported by the pass, not per worker"
+    assert_equal "worktree_branch_mismatch", summary.dig("details", "workspace_cleanup_outcomes", 0, "reason")
   end
 
   # A shared worktree is removed only once nobody needs it. The *record* of a worker that is done
@@ -286,6 +308,34 @@ class KernelMaintenancePruneWorktreeCleanupTest < Minitest::Test
     assert_equal "Pruned killed records: 0 issues, 1 agent, 1 worktree, and 0 projects.",
                  summaries.first.fetch("message")
     assert_equal ["P1-I1-W1"], summaries.first.dig("details", "removed_worktree_agent_ids")
+  end
+
+  # The killed-record cleanup shares the prune summary shape, so it must also report a preserved
+  # worktree in that one line - at `warning` - instead of a separate per-worker entry.
+  def test_reconciliation_reports_a_preserved_worktree_in_its_one_summary_line
+    project, workspace = managed_project_and_workspace(task_title: "Killed dirty cleanup")
+    File.write(File.join(workspace.fetch("workspace_path"), "unfinished.txt"), "do not discard\n")
+    worker = managed_worker_record(workspace, id: "P1-I1-W1", issue_id: "P1-I1", status: "killed")
+    write_state(
+      state_fixture(
+        projects: [project_record(id: "P1", root_path: project.fetch("project_root"), status: "working")],
+        issues: [issue_record(id: "P1-I1", project_id: "P1", status: "working", agent_ids: [worker.fetch("id")])],
+        agents: [worker]
+      )
+    )
+
+    apply_command(build_engine, "ReconcileSessions", {})
+
+    assert Dir.exist?(workspace.fetch("worktree_root_path")), "a dirty worktree is never force-removed"
+    logs = read_state.fetch("logs")
+    summaries = logs.select { |log| log.fetch("message").start_with?("Pruned killed records:") }
+    assert_equal 1, summaries.length
+    assert_equal "Pruned killed records: 0 issues, 1 agent, 0 worktrees, and 0 projects. " \
+                 "Preserved 1 managed worktree because cleanup was not safe: P1-I1-W1 (worktree_dirty).",
+                 summaries.first.fetch("message")
+    assert_equal "warning", summaries.first.fetch("level")
+    assert_equal "worktree_dirty", summaries.first.dig("details", "workspace_cleanup_outcomes", 0, "reason")
+    assert_empty logs.select { |log| log.fetch("message").include?("could not be removed") }
   end
 
   def test_project_root_and_dedicated_directory_workspaces_are_not_deleted
