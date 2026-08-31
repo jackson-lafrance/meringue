@@ -102,6 +102,32 @@ class KernelWorkersQuietWorkerTest < Minitest::Test
     assert_in_delta Time.now, Time.iso8601(last_activity_at(engine, worker_id)), 60
   end
 
+  def test_leaving_working_clears_warning_eligibility_for_a_later_active_episode
+    engine, worker_id = quiet_worker(seconds: THRESHOLD + 60)
+    apply!(engine, "ReconcileSessions", {})
+    assert quiet_warning_marked?(engine, worker_id)
+
+    patch_agent!(worker_id) { |record| record["status"] = "completed" }
+    apply!(engine, "ReconcileSessions", {})
+    refute quiet_warning_marked?(engine, worker_id)
+
+    patch_agent!(worker_id) { |record| record["status"] = "working" }
+    age_activity!(worker_id, seconds: THRESHOLD + 60)
+    apply!(engine, "ReconcileSessions", {})
+
+    assert_equal 2, quiet_logs(engine).length
+  end
+
+  def test_a_settled_worker_is_never_called_quiet
+    engine, worker_id = quiet_worker(seconds: THRESHOLD * 4)
+    patch_agent!(worker_id) { |record| record["status"] = "completed" }
+
+    apply!(engine, "ReconcileSessions", {})
+
+    assert_equal "completed", agent(engine, worker_id).fetch("status")
+    assert_empty quiet_logs(engine), "a worker that finished is silent on purpose"
+  end
+
   def test_a_turn_that_settles_in_the_quiet_pass_is_never_called_quiet
     client = RecordingHarnessClient.new(provider: "pi", streaming: false)
     client.last_assistant_text = "Finished the assigned work."
