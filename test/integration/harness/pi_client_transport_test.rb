@@ -292,6 +292,24 @@ class HarnessPiClientTransportTest < HarnessIntegrationTest
     assert_equal reference, attached.dig("session_settings", "model", "reference")
   end
 
+  def test_first_pi_focus_reconnects_a_dead_pending_tool_session
+    client, stub = build_pi_client(tmpdir, stub_config: { "session_id" => "sess-1" })
+    session_file = pi_session_file(tmpdir, session_id: "sess-1", completed: false)
+    dead_pid = spawn_idle_ruby_process(seconds: 1)
+    reap_pid(dead_pid)
+    ref = pi_session_ref(session_file: session_file, pid: dead_pid, cwd: tmpdir)
+
+    prepared = client.prepare_interactive_session(ref)
+    attached = prepared.fetch("session_ref")
+
+    assert process_alive?(attached.fetch("pid")), "first focus must attach before building the native command"
+    assert_equal session_file, attached.fetch("session_file")
+    assert_includes prepared.fetch("interactive_argv"), "--approve"
+    refute_includes prepared.fetch("interactive_argv"), "continue the interrupted assignment"
+    assert_empty stub_commands_of_type(stub, "prompt")
+    @harness_sessions << [client, attached]
+  end
+
   def test_pi_focus_uses_the_existing_managed_session_view
     client, stub = build_pi_client(
       tmpdir,
@@ -305,8 +323,8 @@ class HarnessPiClientTransportTest < HarnessIntegrationTest
     view = client.open_session_view(managed)
     snapshot = view.snapshot
 
-    assert client.managed_session_view_supported?
-    refute client.interactive_session_supported?
+    refute client.managed_session_view_supported?
+    assert client.interactive_session_supported?
     assert_equal "live", snapshot.fetch("availability")
     assert_equal "streaming", snapshot.fetch("session_state")
     assert_equal "sess-1", snapshot.fetch("session_id")

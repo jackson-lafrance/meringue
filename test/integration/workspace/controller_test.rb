@@ -312,6 +312,8 @@ class WorkspaceControllerTest < Minitest::Test
       @sessions.last.feed_output("tool started\r\n")
       assert_equal [agent.fetch("id")], focus.activity,
                    "native PTY output must refresh activity even when no harness event is logged"
+      assert_equal({ "status" => "written", "bytes" => 4 }, controller.handle_agent_key(key: "\e[A", agent: agent))
+      assert_equal({ "status" => "written", "bytes" => 4 }, controller.handle_agent_key(key: "\e[B", agent: agent))
       assert_equal(
         { "status" => "written", "bytes" => 4 },
         controller.handle_agent_key(key: { "type" => "mouse", "kind" => "wheel_down", "x" => 3, "y" => 2 }, agent: agent)
@@ -319,7 +321,7 @@ class WorkspaceControllerTest < Minitest::Test
 
       closed = controller.close_workspace(agent: agent)
       assert_equal "closed", closed.fetch("status")
-      assert_equal ["x\n", "\e[5~", "\e[6~", "\u0003"], @sessions.last.writes
+      assert_equal ["x\n", "\e[5~", "\e[5~", "\e[6~", "\e[6~", "\u0003"], @sessions.last.writes
       assert_equal 1, @sessions.last.closes
       assert_equal [agent.fetch("id")], focus.ended
     ensure
