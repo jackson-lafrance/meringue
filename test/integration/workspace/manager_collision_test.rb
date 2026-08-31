@@ -8,16 +8,16 @@ require "support/workspace_support"
 class WorkspaceManagerCollisionTest < Minitest::Test
   include WorkspaceSupport
 
-  # Forces independent workers onto the same preferred candidate so ownership—not the normal
-  # agent-id hash in the name—is what must prevent adoption. This reproduces legacy plans and any
-  # future naming collision without weakening production branch naming.
+  # Forces independent workers onto the same preferred candidate so ownership—not a
+  # name similarity—is what must prevent adoption. This reproduces legacy plans and
+  # future naming collisions without weakening production branch naming.
   class SameCandidateManager < Meringue::Workspace::Manager
     def plan_worker_workspace(**arguments)
       plan = super
       project = File.basename(File.expand_path(arguments.fetch(:project_root)))
       plan.merge(
         "workspace_path" => File.join(root_path, project, "forced-candidate"),
-        "workspace_branch" => "forced-candidate-deadbeef"
+        "workspace_branch" => "forced-candidate"
       )
     end
   end
@@ -236,7 +236,7 @@ class WorkspaceManagerCollisionTest < Minitest::Test
     end
   end
 
-  # A leftover meringue/ branch that carries commits is never recreated from
+  # A leftover task branch that carries commits is never recreated from
   # origin/main: reallocation checks the branch back out, so an interrupted
   # worker's commits stay reachable and stay in its worktree.
   def test_reallocating_after_release_keeps_the_branch_and_its_commits

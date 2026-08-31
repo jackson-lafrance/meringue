@@ -130,7 +130,7 @@ class WorkspaceManagerSharedWorktreeTest < Minitest::Test
 
       outcome = manager.inspect_shared_worktree(
         worktree_root: project.fetch("project_root"),
-        branch: "whatever-a1b2c3d4",
+        branch: "whatever",
         git_root: project.fetch("project_root")
       )
 
@@ -145,7 +145,7 @@ class WorkspaceManagerSharedWorktreeTest < Minitest::Test
       manager = workspace_manager(tmp)
       workspace = allocate_workspace(manager, project, task_title: "Foreign branch")
 
-      outcome = inspect_workspace(manager, workspace, branch: "main")
+      outcome = inspect_workspace(manager, workspace, branch: "feature/somebody-elses")
 
       refute outcome.fetch("usable")
       assert_equal "branch_not_delivery_managed", outcome.fetch("reason")

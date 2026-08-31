@@ -117,19 +117,19 @@ class WorkspaceProfileTest < Minitest::Test
   def test_default_path_template_is_valid_and_expands_under_root
     profile = Meringue::Workspace::Profile.new(name: "x")
     assert profile.path_template_valid?
-    expanded = profile.expand_path(root: "/tmp/r", project_slug: "proj", task_slug: "task", suffix: "abcd1234")
-    assert_equal "/tmp/r/proj/task-abcd1234", expanded
+    expanded = profile.expand_path(root: "/tmp/r", project_slug: "proj", task_slug: "task")
+    assert_equal "/tmp/r/proj/task", expanded
   end
 
   def test_custom_path_template_expands_with_placeholders
     profile = Meringue::Workspace::Profile.new(
       name: "x",
-      path_template: "{{root}}/checkouts/{{project}}/{{task}}-{{suffix}}"
+      path_template: "{{root}}/checkouts/{{project}}/{{task}}"
     )
     assert profile.path_template_valid?
     assert profile.custom_path_template?
-    expanded = profile.expand_path(root: "/tmp/r", project_slug: "proj", task_slug: "task", suffix: "s1")
-    assert_equal "/tmp/r/checkouts/proj/task-s1", expanded
+    expanded = profile.expand_path(root: "/tmp/r", project_slug: "proj", task_slug: "task")
+    assert_equal "/tmp/r/checkouts/proj/task", expanded
   end
 
   def test_path_template_with_parent_segment_is_rejected
@@ -138,7 +138,7 @@ class WorkspaceProfileTest < Minitest::Test
       path_template: "{{root}}/../../escape/{{task}}"
     )
     refute profile.path_template_valid?
-    assert_nil profile.expand_path(root: "/tmp/r", project_slug: "p", task_slug: "t", suffix: "s")
+    assert_nil profile.expand_path(root: "/tmp/r", project_slug: "p", task_slug: "t")
   end
 
   def test_path_template_with_shell_metacharacters_is_rejected
@@ -149,13 +149,22 @@ class WorkspaceProfileTest < Minitest::Test
     refute profile.path_template_valid?
   end
 
+  def test_path_template_cannot_restore_retired_suffix_placeholder
+    profile = Meringue::Workspace::Profile.new(
+      name: "x",
+      path_template: "{{root}}/{{project}}/{{task}}-{{suffix}}"
+    )
+    refute profile.path_template_valid?
+    assert_nil profile.expand_path(root: "/tmp/r", project_slug: "p", task_slug: "t")
+  end
+
   def test_path_template_escaping_managed_root_returns_nil
     profile = Meringue::Workspace::Profile.new(
       name: "x",
       path_template: "{{root}}/../escape/{{task}}"
     )
     refute profile.path_template_valid?
-    assert_nil profile.expand_path(root: "/tmp/r", project_slug: "p", task_slug: "t", suffix: "s")
+    assert_nil profile.expand_path(root: "/tmp/r", project_slug: "p", task_slug: "t")
   end
 
   def test_to_h_round_trips_declared_fields

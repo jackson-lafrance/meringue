@@ -134,7 +134,7 @@ class KernelMaintenancePruneWorktreeCleanupTest < Minitest::Test
   def test_branch_mismatch_prunes_records_but_preserves_the_registered_worktree
     project, workspace = managed_project_and_workspace(task_title: "Mismatched cleanup")
     registered_branch = workspace.fetch("workspace_branch")
-    mismatched_branch = "someone-elses-branch-a1b2c3d4"
+    mismatched_branch = "someone-elses-branch"
     worker = managed_worker_record(workspace, id: "P1-I1-W1", issue_id: "P1-I1", status: "completed")
     worker["workspace_branch"] = mismatched_branch
     worker.fetch("harness_metadata").fetch("workspace_plan")["workspace_branch"] = mismatched_branch

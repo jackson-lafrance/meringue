@@ -466,7 +466,7 @@ default_profile = "core"
 [profiles.core]
 sparse_cone = true
 sparse_patterns = ["/src/", "/docs/"]
-path_template = "{{root}}/{{project}}/{{task}}-{{suffix}}"
+path_template = "{{root}}/{{project}}/{{task}}"
 validation_command = ["bin/validate-checkout"]
 ```
 
@@ -475,9 +475,11 @@ All fields except `sparse_patterns` are optional:
 
 - `sparse_patterns` enables sparse provisioning when non-empty. `sparse_cone` selects cone mode.
 - `path_template` declares the project's native checkout layout. Placeholders are `{{root}}`,
-  `{{project}}`, `{{task}}`, and `{{suffix}}`; the default is
-  `{{root}}/{{project}}/{{task}}-{{suffix}}`. A template that escapes the managed workspace root
-  or contains unsafe characters is rejected and the default layout is used.
+  `{{project}}`, and `{{task}}`; the default is `{{root}}/{{project}}/{{task}}`. A template that
+  escapes the managed workspace root, names an unknown placeholder (the retired `{{suffix}}`
+  included), or contains unsafe characters is rejected and the default layout is used.
+  Workspace names collide only when two tasks share a slug; the allocator then appends a
+  deterministic numeric suffix (`-2`, `-3`, …) rather than an opaque hash.
 - `validation_command` is an argv array run inside the checkout after provisioning. A non-zero
   exit fails provisioning so a worker never launches in a checkout its project tooling rejects.
 

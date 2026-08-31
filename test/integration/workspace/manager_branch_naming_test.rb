@@ -20,7 +20,7 @@ class WorkspaceManagerBranchNamingTest < Minitest::Test
 
       assert_equal "git_worktree", plan.fetch("strategy")
       refute plan.fetch("created")
-      assert_match(/\Aquestion-answering-does-nothing-[0-9a-f]{8}\z/, plan.fetch("workspace_branch"))
+      assert_equal "question-answering-does-nothing", plan.fetch("workspace_branch")
       assert_equal(
         File.join(tmp, "workspaces", "meringue", plan.fetch("workspace_branch")),
         plan.fetch("workspace_path")
@@ -39,7 +39,7 @@ class WorkspaceManagerBranchNamingTest < Minitest::Test
       )
 
       branch = plan.fetch("workspace_branch")
-      assert_equal "answer-questions-properly", branch.sub(/-[0-9a-f]{8}\z/, "")
+      assert_equal "answer-questions-properly", branch
       refute_match(/p1/i, branch)
       refute_match(/-i9/i, branch)
       refute_match(/w2/i, branch)
@@ -48,7 +48,7 @@ class WorkspaceManagerBranchNamingTest < Minitest::Test
     end
   end
 
-  def test_plan_suffix_is_deterministic_per_worker_and_unique_across_workers
+  def test_plan_is_deterministic_per_task_but_allocator_collision_handling_stays_numeric
     with_workspace_tmpdir do |tmp|
       manager = workspace_manager(tmp)
       arguments = {
@@ -64,8 +64,29 @@ class WorkspaceManagerBranchNamingTest < Minitest::Test
 
       assert_equal first.fetch("workspace_branch"), repeat.fetch("workspace_branch")
       assert_equal first.fetch("workspace_path"), repeat.fetch("workspace_path")
-      refute_equal first.fetch("workspace_branch"), other.fetch("workspace_branch")
-      assert_equal "shared-task-title", first.fetch("workspace_branch")[/\A(.+)-[0-9a-f]{8}\z/, 1]
+      assert_equal first.fetch("workspace_branch"), other.fetch("workspace_branch")
+      assert_equal "shared-task-title", first.fetch("workspace_branch")
+    end
+  end
+
+  def test_custom_workspace_template_does_not_restore_an_opaque_or_dangling_suffix
+    with_workspace_tmpdir do |tmp|
+      profile = Meringue::Workspace::Profile.new(
+        name: "clean",
+        path_template: "{{root}}/{{project}}/{{task}}"
+      )
+      plan = workspace_manager(tmp).plan_worker_workspace(
+        project_root: File.join(tmp, "meringue"),
+        project_id: "P1",
+        issue_id: "P1-I1",
+        agent_id: "P1-I1-W1",
+        task_title: "Clean workspace names",
+        profile: profile
+      )
+
+      assert_equal "clean-workspace-names", plan.fetch("workspace_branch")
+      assert_equal File.join(tmp, "workspaces", "meringue", "clean-workspace-names"), plan.fetch("workspace_path")
+      refute_includes File.basename(plan.fetch("workspace_path")), "{{suffix}}"
     end
   end
 
@@ -79,7 +100,7 @@ class WorkspaceManagerBranchNamingTest < Minitest::Test
         task_title: "P1-I1 ***"
       )
 
-      assert_match(/\Achange-[0-9a-f]{8}\z/, plan.fetch("workspace_branch"))
+      assert_equal "change", plan.fetch("workspace_branch")
     end
   end
 
@@ -93,7 +114,7 @@ class WorkspaceManagerBranchNamingTest < Minitest::Test
         task_title: "Integration tests for workspace and worktree management across the whole kernel"
       )
 
-      slug = plan.fetch("workspace_branch")[/\A(.+)-[0-9a-f]{8}\z/, 1]
+      slug = plan.fetch("workspace_branch")
       assert_operator slug.length, :<=, 48
       refute slug.end_with?("-")
       assert_equal File.join(tmp, "workspaces", "meringue"), File.dirname(plan.fetch("workspace_path"))

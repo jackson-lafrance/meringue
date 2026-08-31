@@ -27,7 +27,7 @@ module Meringue
     #   [profiles.core]
     #   sparse_cone = true
     #   sparse_patterns = ["/src/", "/docs/"]
-    #   path_template = "{{root}}/{{project}}/{{task}}-{{suffix}}"
+    #   path_template = "{{root}}/{{project}}/{{task}}"
     #   validation_command = ["bin/validate-checkout"]
     #
     # A single-profile file may use the flat `[profile]` table instead of the
@@ -35,8 +35,8 @@ module Meringue
     # optional; `sparse_patterns` enables sparse provisioning when non-empty.
     class Profile
       PROFILE_FILE_RELATIVE_PATH = ".meringue/workspace-profile.toml"
-      DEFAULT_PATH_TEMPLATE = "{{root}}/{{project}}/{{task}}-{{suffix}}"
-      ALLOWED_PLACEHOLDERS = %w[root project task suffix].freeze
+      DEFAULT_PATH_TEMPLATE = "{{root}}/{{project}}/{{task}}"
+      ALLOWED_PLACEHOLDERS = %w[root project task].freeze
       PLACEHOLDER_PATTERN = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/.freeze
       # A path template must only carry literal path characters and the allowed
       # placeholders, so a project can never redirect worktrees outside the
@@ -86,10 +86,13 @@ module Meringue
         return true if path_template.nil? || path_template == DEFAULT_PATH_TEMPLATE
         return false if path_template.length > MAX_PATTERN_LENGTH
 
+        placeholders = path_template.scan(PLACEHOLDER_PATTERN).flatten
+        return false unless placeholders.all? { |placeholder| ALLOWED_PLACEHOLDERS.include?(placeholder) }
+
         stripped = path_template.gsub(PLACEHOLDER_PATTERN, "")
         return false unless stripped.empty? || PATH_TEMPLATE_LITERAL_PATTERN.match?(stripped)
 
-        expand_template(path_template, root: "r", project: "p", task: "t", suffix: "s")
+        expand_template(path_template, root: "r", project: "p", task: "t")
           .split(File::SEPARATOR).none? { |segment| segment == ".." }
       end
 
@@ -97,14 +100,15 @@ module Meringue
       # when the template is invalid or the expanded path escapes `root`, so the
       # caller falls back to the default layout and ownership/collision
       # machinery still applies.
-      def expand_path(root:, project_slug:, task_slug:, suffix:)
+      def expand_path(root:, project_slug:, task_slug:)
         template = path_template || DEFAULT_PATH_TEMPLATE
         return nil unless path_template_valid?
 
         root_path = File.expand_path(root.to_s)
-        expanded = File.expand_path(expand_template(
-          template, root: root_path, project: project_slug.to_s, task: task_slug.to_s, suffix: suffix.to_s
-        ))
+        expanded_template = expand_template(
+          template, root: root_path, project: project_slug.to_s, task: task_slug.to_s
+        )
+        expanded = File.expand_path(expanded_template)
         return nil unless expanded == root_path || expanded.start_with?("#{root_path}#{File::SEPARATOR}")
 
         expanded
@@ -211,8 +215,8 @@ module Meringue
 
       # ---- private instance helpers ----------------------------------------
 
-      def expand_template(template, root:, project:, task:, suffix:)
-        values = { "root" => root.to_s, "project" => project.to_s, "task" => task.to_s, "suffix" => suffix.to_s }
+      def expand_template(template, root:, project:, task:)
+        values = { "root" => root.to_s, "project" => project.to_s, "task" => task.to_s }
         template.gsub(PLACEHOLDER_PATTERN) do |match|
           key = Regexp.last_match(1)
           if ALLOWED_PLACEHOLDERS.include?(key)

@@ -59,7 +59,7 @@ class WorkspaceStrategySelectionTest < Minitest::Test
       assert_equal [], resolved.fetch("errors")
       refute resolved.fetch("created")
       assert_equal "Version-control backend planned an isolated workspace for this worker.", resolved.fetch("note")
-      assert_match(/\A[a-z0-9-]+-[0-9a-f]{8}\z/, resolved.fetch("workspace_branch"))
+      assert_match(/\A[a-z0-9][a-z0-9-]*\z/, resolved.fetch("workspace_branch"))
       assert_equal resolved.dig("plan", "workspace_path"), resolved.fetch("workspace_path")
       refute_equal real_path(project.fetch("project_root")), resolved.fetch("workspace_path")
       refute Dir.exist?(resolved.fetch("workspace_path")), "a preview must not create the worktree"
@@ -78,7 +78,7 @@ class WorkspaceStrategySelectionTest < Minitest::Test
       assert_nil resolved.fetch("note")
       assert Dir.exist?(resolved.fetch("workspace_path"))
       assert_equal resolved.dig("plan", "workspace_path"), resolved.fetch("workspace_path")
-      assert_match(/\A[a-z0-9-]+-[0-9a-f]{8}\z/, resolved.fetch("workspace_branch"))
+      assert_match(/\A[a-z0-9][a-z0-9-]*\z/, resolved.fetch("workspace_branch"))
     end
   end
 

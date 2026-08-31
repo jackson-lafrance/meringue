@@ -46,12 +46,18 @@ class FoundationDeliveryArtifactPolicyTest < Minitest::Test
   end
 
   # The `meringue/` prefix is no longer recognized: that compatibility was removed, so a
-  # branch under it is somebody else's branch and must never be cleaned up as ours.
-  def test_managed_branch_recognizes_managed_names_and_nothing_else
-    assert Policy.managed_branch?("fix-checkout-retries-a1b2c3d4")
-    assert Policy.managed_branch?("fix-checkout-retries-a1b2c3d4-2")
+  # branch under it is somebody else's branch and must never be cleaned up as ours. Neither
+  # is the retired hash-suffixed format, nor a bare Git object SHA.
+  def test_managed_branch_accepts_current_names_only
+    assert Policy.managed_branch?("fix-checkout-retries")
+    assert Policy.managed_branch?("fix-checkout-retries-2")
+    assert Policy.managed_branch?("fix-checkout-retries-3")
+    refute Policy.managed_branch?("fix-checkout-retries-a1b2c3d4")
+    refute Policy.managed_branch?("fix-checkout-retries-a1b2c3d4-2")
     refute Policy.managed_branch?("meringue/fix-checkout-retries-a1b2c3d4")
     refute Policy.managed_branch?("feature/fix-checkout-retries")
+    refute Policy.managed_branch?("deadbeef")
+    refute Policy.managed_branch?("0123456789012345678901234567890123456789")
     refute Policy.managed_branch?("P5-I2-W3")
   end
 end

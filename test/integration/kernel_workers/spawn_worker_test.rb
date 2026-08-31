@@ -65,7 +65,7 @@ class KernelWorkersSpawnTest < Minitest::Test
     worker = agent(engine, result.fetch("target_id"))
 
     assert_equal "git_worktree", worker.fetch("workspace_strategy")
-    assert_match(/\Afix-the-login-bug-[0-9a-f]{8}\z/, worker.fetch("workspace_branch"))
+    assert_equal "fix-the-login-bug", worker.fetch("workspace_branch")
     assert worker.fetch("workspace_path").start_with?(workspace_root), "workspace should live under the configured root"
     assert_equal worker.fetch("workspace_path"), worker.fetch("harness_metadata").fetch("cwd")
     assert_equal "ready", worker.fetch("harness_metadata").fetch("provisioning_state")
