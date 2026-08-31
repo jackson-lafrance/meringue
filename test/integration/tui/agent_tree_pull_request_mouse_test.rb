@@ -53,7 +53,7 @@ class TuiAgentTreePullRequestMouseTest < Minitest::Test
   # action, so opening a pull request is a choice inside that menu.
   def test_right_clicking_an_issue_opens_its_context_menu
     url = "https://github.com/owner/repo/pull/42"
-    state = state_with_issue_and_worker("delivery_pull_request" => { "url" => url, "state" => "open" })
+    state = state_with_issue_and_worker("delivery_pull_requests" => [{ "url" => url, "state" => "open" }])
 
     result = send_right_click(state, "P1-I1")
 
@@ -67,7 +67,7 @@ class TuiAgentTreePullRequestMouseTest < Minitest::Test
 
   def test_choosing_open_pull_request_from_the_menu_opens_it
     url = "https://github.com/owner/repo/pull/42"
-    state = state_with_issue_and_worker("delivery_pull_request" => { "url" => url, "state" => "open" })
+    state = state_with_issue_and_worker("delivery_pull_requests" => [{ "url" => url, "state" => "open" }])
     send_right_click(state, "P1-I1")
 
     activate_menu_entry(state, "Open pull request")
@@ -78,7 +78,7 @@ class TuiAgentTreePullRequestMouseTest < Minitest::Test
 
   def test_right_clicking_a_worker_offers_worker_verbs_instead_of_the_issue_pull_request
     url = "https://github.com/owner/repo/pull/42"
-    state = state_with_issue_and_worker("delivery_pull_request" => { "url" => url, "state" => "open" })
+    state = state_with_issue_and_worker("delivery_pull_requests" => [{ "url" => url, "state" => "open" }])
 
     send_right_click(state, "P1-I1-W1")
 
@@ -102,7 +102,7 @@ class TuiAgentTreePullRequestMouseTest < Minitest::Test
 
   def test_double_clicking_an_issue_opens_its_pull_request_instead_of_a_worker_workspace
     url = "https://github.com/owner/repo/pull/42"
-    state = state_with_issue_and_worker("delivery_pull_request" => { "url" => url, "state" => "open" })
+    state = state_with_issue_and_worker("delivery_pull_requests" => [{ "url" => url, "state" => "open" }])
 
     double_click(state, "P1-I1")
 

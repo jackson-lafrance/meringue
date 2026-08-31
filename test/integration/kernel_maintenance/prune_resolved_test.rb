@@ -27,7 +27,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     )
     engine = build_engine
 
-    result = apply_command(engine, "Prune", "selector" => "resolved")
+    result = apply_command(engine, "Prune")
 
     assert_equal "accepted", result.fetch("status")
     assert_equal "Pruned 1 issue, 1 agent, 0 worktrees, and 0 projects.", result.fetch("message")
@@ -35,7 +35,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     assert_equal ["P1-I1"], details.fetch("removed_issue_ids")
     assert_equal ["P1-I1-W1"], details.fetch("removed_agent_ids")
     assert_empty details.fetch("removed_project_ids")
-    assert_equal "resolved", details.fetch("requested_selector")
+    assert_nil details.fetch("requested_selector", nil), "prune no longer has a selector"
 
     state = read_state
     assert_empty state.fetch("issues")
@@ -49,8 +49,10 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     assert_documented_status_vocabulary(state)
   end
 
-  def test_legacy_selector_words_are_recorded_but_do_not_change_the_prune
-    %w[all completed merged resolved errored].each do |alias_selector|
+  # Prune has no options any more. A selector left over in a payload is neither honoured
+  # nor echoed back, and never turns into a failure: every eligible record is pruned.
+  def test_a_leftover_selector_payload_is_ignored_entirely
+    %w[all completed merged resolved errored everything].each do |leftover|
       write_state(
         state_fixture(
           projects: [project_record(id: "P1", status: "working")],
@@ -60,11 +62,11 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
       )
       engine = build_engine
 
-      result = apply_command(engine, "Prune", "selector" => alias_selector)
+      result = apply_command(engine, "Prune", "selector" => leftover)
 
       assert_equal "accepted", result.fetch("status")
-      assert_equal alias_selector, result.dig("result", "requested_selector")
-      assert_equal ["P1-I1"], result.dig("result", "removed_issue_ids")
+      assert_nil result.dig("result", "requested_selector"), leftover
+      assert_equal ["P1-I1"], result.dig("result", "removed_issue_ids"), leftover
     end
   end
 
@@ -86,25 +88,6 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     assert_empty read_state.fetch("issues")
   end
 
-  # The input layer rejects unknown `/prune` arguments (see the slash command parser tests). The
-  # kernel itself never fails on one: it records the word and prunes everything eligible.
-  def test_unknown_selector_value_is_recorded_and_ignored
-    write_state(
-      state_fixture(
-        projects: [project_record(id: "P1", status: "working")],
-        issues: [issue_record(id: "P1-I1", project_id: "P1", status: "completed")]
-      )
-    )
-    engine = build_engine
-
-    result = apply_command(engine, "Prune", "selector" => "everything")
-
-    assert_equal "accepted", result.fetch("status")
-    assert_equal "everything", result.dig("result", "requested_selector")
-    assert_equal ["P1-I1"], result.dig("result", "removed_issue_ids")
-    assert_empty read_state.fetch("issues")
-  end
-
   def test_nonterminal_child_issue_retains_completed_parent_subtree
     write_state(
       state_fixture(
@@ -117,7 +100,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     )
     engine = build_engine
 
-    result = apply_command(engine, "Prune", "selector" => "resolved")
+    result = apply_command(engine, "Prune")
 
     assert_empty result.dig("result", "removed_issue_ids")
     decision = result.dig("result", "issue_decisions").find { |entry| entry.fetch("issue_id") == "P1-I1" }
@@ -138,7 +121,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
       )
       engine = build_engine
 
-      result = apply_command(engine, "Prune", "selector" => "resolved")
+      result = apply_command(engine, "Prune")
 
       assert_empty result.dig("result", "removed_issue_ids"), "#{worker_status} worker should retain its issue"
       decision = result.dig("result", "issue_decisions").first
@@ -162,7 +145,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     )
     engine = build_engine
 
-    result = apply_command(engine, "Prune", "selector" => "resolved")
+    result = apply_command(engine, "Prune")
 
     assert_equal ["P1-I1"], result.dig("result", "removed_issue_ids")
     assert_equal %w[P1-I1-W1 P1-I1-W2 P1-I1-W3], result.dig("result", "removed_agent_ids").sort
@@ -179,7 +162,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     )
     engine = build_engine
 
-    result = apply_command(engine, "Prune", "selector" => "resolved")
+    result = apply_command(engine, "Prune")
 
     issue_decision = result.dig("result", "issue_decisions").first
     refute issue_decision.fetch("prunable")
@@ -209,7 +192,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     )
     engine = build_engine
 
-    result = apply_command(engine, "Prune", "selector" => "resolved")
+    result = apply_command(engine, "Prune")
 
     assert_equal ["P1-I1"], result.dig("result", "removed_issue_ids")
     # Questions are not executable work, so pruning an issue leaves their records alone.
@@ -239,7 +222,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     )
     engine = build_engine(forge_client: forge)
 
-    result = apply_command(engine, "Prune", "selector" => "merged")
+    result = apply_command(engine, "Prune")
 
     assert_equal %w[P1-I2 P1-I3], result.dig("result", "removed_issue_ids").sort
     assert_equal [url_open], result.dig("result", "blocked_pr_urls")
@@ -260,7 +243,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     )
     engine = build_engine(forge_client: forge)
 
-    result = apply_command(engine, "Prune", "selector" => "resolved")
+    result = apply_command(engine, "Prune")
 
     assert_empty result.dig("result", "removed_issue_ids")
     assert_equal [url], result.dig("result", "blocked_pr_urls")
@@ -278,7 +261,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     )
     engine = build_engine(forge_client: forge)
 
-    result = apply_command(engine, "Prune", "selector" => "resolved")
+    result = apply_command(engine, "Prune")
 
     assert_empty result.dig("result", "removed_issue_ids")
     blockers = result.dig("result", "issue_decisions").first.fetch("pull_request_blockers")
@@ -304,7 +287,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     )
     engine = build_engine
 
-    result = apply_command(engine, "Prune", "selector" => "resolved")
+    result = apply_command(engine, "Prune")
 
     assert_equal ["P1"], result.dig("result", "removed_project_ids")
     assert_equal %w[P1-I1 P2-I1 P3-I1], result.dig("result", "removed_issue_ids").sort
@@ -341,7 +324,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     )
     engine = build_engine
 
-    result = apply_command(engine, "Prune", "selector" => "resolved")
+    result = apply_command(engine, "Prune")
 
     assert_equal ["P1-I1"], result.dig("result", "removed_issue_ids")
     assert_equal ["P1-I1-W1"], result.dig("result", "removed_agent_ids")
@@ -378,7 +361,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     )
     engine = build_engine
 
-    result = apply_command(engine, "Prune", "selector" => "resolved")
+    result = apply_command(engine, "Prune")
 
     assert_equal %w[H1 H2], result.dig("result", "removed_agent_ids").sort
     assert_equal ["H3"], ids(read_state.fetch("agents"))
@@ -393,7 +376,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     )
     engine = build_engine
 
-    result = apply_command(engine, "Prune", "selector" => "resolved")
+    result = apply_command(engine, "Prune")
 
     assert_equal "accepted", result.fetch("status")
     assert_equal "Pruned 0 issues, 0 agents, 0 worktrees, and 0 projects.", result.fetch("message")

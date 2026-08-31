@@ -251,6 +251,8 @@ module KernelGoalsSupport
     run_git(root, "config", "user.name", "Meringue Tests")
     run_git(root, "add", ".")
     run_git(root, "commit", "-m", "initial commit")
+    # See KernelWorkersSupport#create_git_repo: the origin is read for its host, never fetched.
+    run_git(root, "remote", "add", "origin", "git@github.com:example/#{name}.git")
     root
   end
 

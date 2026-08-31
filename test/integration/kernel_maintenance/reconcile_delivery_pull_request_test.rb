@@ -245,7 +245,6 @@ class KernelMaintenanceReconcileDeliveryPullRequestTest < Minitest::Test
     issues = (1..count).map do |index|
       issue = issue_with_pull_request(id: "P1-I#{index}", project_id: "P1", url: "https://github.com/acme/app/pull/#{index}")
       issue.fetch("delivery_pull_requests").each { |record| record["last_checked_at"] = checked_at }
-      issue["delivery_pull_request"]["last_checked_at"] = checked_at
       issue
     end
     write_state(state_fixture(projects: [project_record(id: "P1", status: "working")], issues: issues))
@@ -263,7 +262,6 @@ class KernelMaintenanceReconcileDeliveryPullRequestTest < Minitest::Test
         issues: issues.each do |issue|
           stale = (Time.now.utc - (interval + spread + 10)).iso8601
           issue.fetch("delivery_pull_requests").each { |record| record["last_checked_at"] = stale }
-          issue["delivery_pull_request"]["last_checked_at"] = stale
         end
       )
     )

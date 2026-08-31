@@ -140,11 +140,11 @@ class TuiChatPaneTest < Minitest::Test
   def test_delivery_pr_hint_appears_for_the_selected_agent
     issue = issue_record(
       "P1-I1",
-      "delivery_pull_request" => {
+      "delivery_pull_requests" => [{
         "url" => "https://github.com/owner/repo/pull/9",
         "state" => "open",
         "last_checked_at" => Time.now.utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-      }
+      }]
     )
     state = composed_state(
       empty_state.merge("issues" => [issue], "agents" => [agent_record("P1-I1-W1", "issue_id" => "P1-I1")]),

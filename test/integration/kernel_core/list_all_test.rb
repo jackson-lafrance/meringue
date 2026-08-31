@@ -158,7 +158,7 @@ class KernelCoreListAllTest < Minitest::Test
     create_issue!("P1", title: "Parent issue")
     create_issue!("P1", title: "Child issue", "parent_issue_id" => "P1-I1")
     create_issue!("P2", title: "Other project issue")
-    spawn_worker!("P1-I2", workspace_path: project_path)
+    spawn_worker!("P1-I2")
     spawn_head!(user_message: "Check the flaky signup spec")
     ask_question!("H1", question: "Should this target staging?", "project_id" => "P1", "issue_id" => "P1-I2")
   end

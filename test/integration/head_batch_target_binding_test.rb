@@ -595,6 +595,9 @@ class HeadBatchTargetBindingTest < Minitest::Test
     File.write(File.join(path, "README.md"), "# fixture\n")
     system("git", "add", "README.md", chdir: path) || raise("git add failed")
     system("git", "commit", "-q", "-m", "initial", chdir: path, out: File::NULL, err: File::NULL) || raise("git commit failed")
+    # Registration proves isolated workspaces from a GitHub origin. The URL is read for
+    # its host, never contacted.
+    system("git", "remote", "add", "origin", "git@github.com:example/fixture.git", chdir: path) || raise("git remote failed")
     path
   end
 

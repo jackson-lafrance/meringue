@@ -162,7 +162,7 @@ class WorkspaceManagerWorktreeTest < Minitest::Test
     end
   end
 
-  def test_falls_back_to_project_root_outside_a_git_repository
+  def test_allocation_outside_a_git_repository_fails_instead_of_falling_back
     with_workspace_tmpdir do |tmp|
       plain_root = File.join(tmp, "plain-project")
       FileUtils.mkdir_p(plain_root)
@@ -176,18 +176,16 @@ class WorkspaceManagerWorktreeTest < Minitest::Test
         task_title: "No git here"
       )
 
-      assert_equal "project_root", workspace.fetch("strategy")
+      # There is no fallback to the project root any more: a worker's workspace has to be
+      # isolated, so a project that cannot host a worktree fails the allocation outright.
       refute workspace.fetch("created")
-      assert_equal real_path(plain_root), workspace.fetch("workspace_path")
-      assert_nil workspace.fetch("workspace_branch")
-      assert_equal "project root is not inside a git repository", workspace.fetch("fallback_reason")
-      assert_equal [], workspace.fetch("errors")
-      assert_equal "git_worktree", workspace.dig("plan", "strategy")
-      refute Dir.exist?(File.join(tmp, "workspaces")), "fallback must not create a workspaces root"
+      assert_includes workspace.fetch("errors").join(" "), "project root is not inside a git repository"
+      assert_equal "version_control_backend_unavailable", workspace.fetch("failure_kind")
+      refute Dir.exist?(File.join(tmp, "workspaces")), "a failed allocation must not create a workspaces root"
     end
   end
 
-  def test_missing_project_root_falls_back_without_creating_anything
+  def test_missing_project_root_fails_without_creating_anything
     with_workspace_tmpdir do |tmp|
       manager = workspace_manager(tmp)
 
@@ -199,8 +197,8 @@ class WorkspaceManagerWorktreeTest < Minitest::Test
         task_title: "Missing root"
       )
 
-      assert_equal "project_root", workspace.fetch("strategy")
       refute workspace.fetch("created")
+      refute_empty workspace.fetch("errors")
       refute Dir.exist?(File.join(tmp, "does-not-exist"))
     end
   end

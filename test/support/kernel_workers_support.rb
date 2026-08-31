@@ -318,6 +318,10 @@ module KernelWorkersSupport
     run_git(root, "config", "user.name", "Meringue Tests")
     run_git(root, "add", ".")
     run_git(root, "commit", "-m", "initial commit")
+    # Registration accepts a project only once the backend can prove isolated mutable
+    # workspaces, and the built-in backend proves it from a GitHub origin. The URL is
+    # never contacted: it is read, not fetched.
+    run_git(root, "remote", "add", "origin", "git@github.com:example/#{name}.git")
     root
   end
 

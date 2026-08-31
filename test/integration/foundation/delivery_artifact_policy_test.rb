@@ -45,6 +45,9 @@ class FoundationDeliveryArtifactPolicyTest < Minitest::Test
     )
   end
 
+  # The `meringue/` prefix is no longer recognized: that compatibility was removed, so a
+  # branch under it is somebody else's branch and must never be cleaned up as ours. Neither
+  # is the retired hash-suffixed format, nor a bare Git object SHA.
   def test_managed_branch_accepts_current_names_only
     assert Policy.managed_branch?("fix-checkout-retries")
     assert Policy.managed_branch?("fix-checkout-retries-2")

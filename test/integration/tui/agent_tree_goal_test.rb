@@ -316,7 +316,7 @@ class TuiAgentTreeGoalTest < Minitest::Test
   # --- the goal chip and the delivery PR share the row ------------------------
 
   def test_a_goal_issue_with_a_delivery_pull_request_shows_both_markers
-    row = issue_row(goal_state({}, "delivery_pull_request" => OPEN_PR))
+    row = issue_row(goal_state({}, "delivery_pull_requests" => [OPEN_PR]))
     line = plain_line(row)
 
     assert_includes line, "2/5"
@@ -331,7 +331,7 @@ class TuiAgentTreeGoalTest < Minitest::Test
   # pane is ellipsized so they survive, instead of being pushed off the row.
   def test_a_narrow_pane_keeps_the_goal_chip_and_the_pr_marker
     long_title = "Raise coverage of the kernel command application path above eighty percent"
-    state = goal_state({}, "title" => long_title, "delivery_pull_request" => OPEN_PR)
+    state = goal_state({}, "title" => long_title, "delivery_pull_requests" => [OPEN_PR])
 
     [24, 30, 34, 38].each do |width|
       rendered = plain_lines(pane.lines(state, width: width))
@@ -379,7 +379,7 @@ class TuiAgentTreeGoalTest < Minitest::Test
   end
 
   def test_a_narrow_pane_still_maps_wrapped_goal_rows_to_their_issue
-    state = goal_state({}, "title" => "Raise coverage of the kernel command application path", "delivery_pull_request" => OPEN_PR)
+    state = goal_state({}, "title" => "Raise coverage of the kernel command application path", "delivery_pull_requests" => [OPEN_PR])
 
     (20..60).each do |width|
       assert_equal pane.lines(state, width: width).length, pane.line_item_ids(state, width: width).length,

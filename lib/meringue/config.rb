@@ -112,31 +112,67 @@ module Meringue
     # Runs before State::Store can create a new empty state file. An explicit
     # experiment value always wins. Existing installations retain GitHub support;
     # genuinely new installations record the opt-in default (off).
+    #
+    # Schema 2 is the version in which the split-defaults and worker-guidance booleans
+    # became the three modes of experiments.agent_defaults_mode, so the resolved mode is
+    # what this writes down. Bumping the version without recording it left every
+    # unmigrated installation resolving retired booleans on every read, forever.
     def self.migrate_settings!(path: DEFAULT_PATH, state_path: nil)
       expanded_path = File.expand_path(path.to_s)
       config = load(path: expanded_path)
       return config if config.value("settings", "schema_version").to_i >= Schema::VERSION
 
+      # "Existing installation" means one that already has state: it was tracking pull
+      # requests before GitHub support became an opt-in, and turning that off underneath
+      # it would silently drop the PR markers, pickers, and delivery actions it was using.
+      # A genuinely new installation gets the opt-in default instead. Reading only the
+      # explicit value here — and never the state file the caller went to the trouble of
+      # naming — turned every upgrade into an opt-out.
       explicit_github = config.value("experiments", "github_support")
-      github_support = explicit_github == true
+      github_support = explicit_github.nil? ? existing_installation?(state_path) : explicit_github == true
       patches = {
         "settings.schema_version" => Schema::VERSION,
-        "experiments.github_support" => github_support
+        "experiments.github_support" => github_support,
+        "experiments.agent_defaults_mode" => Meringue::Experiments::AgentDefaultsMode.resolve(config)
       }
       store = Store.new(path: expanded_path)
       store.patch_paths(base_fingerprint: store.fingerprint, patches: patches)
     end
 
+    def self.existing_installation?(state_path)
+      return false if state_path.nil?
+
+      File.exist?(File.expand_path(state_path.to_s))
+    end
+
+    # Model and reasoning defaults used to be written per provider; they are role-scoped
+    # and provider-independent now. A provider table itself is not obsolete — it still
+    # owns that harness's command, environment, and launch arguments — so only the moved
+    # keys inside it are named. Rejecting `[harness.pi]` wholesale refused to load a file
+    # whose every remaining key was current, including the one this repo ships as an
+    # example.
+    OBSOLETE_PROVIDER_KEYS = %w[model thinking_level head_model worker_model head_thinking_level worker_thinking_level].freeze
+
+    # Every entry is reported as the full dotted path it occupies in the file. Naming the
+    # leaf alone told the reader that `head_model` was obsolete in the same sentence that
+    # told them to use `harness.head_model`, when what was actually stale was
+    # `harness.pi.head_model`.
     def self.reject_obsolete_settings!(data, path:)
       obsolete = []
       obsolete << "harness.provider" if data.dig("harness", "provider")
-      obsolete.concat(%w[model thinking_level].select { |key| data.dig("harness", key) })
-      obsolete.concat(%w[head_model worker_model head_thinking_level worker_thinking_level].select { |key| data.dig("harness", "pi", key) })
-      obsolete << "harness.pi" if data.dig("harness", "pi").is_a?(Hash)
+      obsolete.concat(%w[model thinking_level].select { |key| data.dig("harness", key) }.map { |key| "harness.#{key}" })
+      harness = data["harness"]
+      if harness.is_a?(Hash)
+        harness.each do |provider, table|
+          next unless table.is_a?(Hash)
+
+          obsolete.concat(OBSOLETE_PROVIDER_KEYS.select { |key| table.key?(key) }.map { |key| "harness.#{provider}.#{key}" })
+        end
+      end
       obsolete << "tui.color_scheme" if data.dig("tui", "color_scheme")
       return if obsolete.empty?
 
-      raise ParseError, "Obsolete configuration settings in #{path}: #{obsolete.uniq.join(", ")}. Use the current schema (harness.head_provider/worker_provider, harness.head_model/worker_model, harness.head_thinking_level/worker_thinking_level, and tui.colorscheme)."
+      raise ParseError, "Obsolete configuration settings in #{path}: #{obsolete.uniq.join(", ")}. Delete those entries; the current schema is harness.head_provider/worker_provider, harness.head_model/worker_model, harness.head_thinking_level/worker_thinking_level, and tui.colorscheme."
     end
 
     def self.write_toml(path, data)

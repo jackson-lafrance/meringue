@@ -117,7 +117,7 @@ class WorkspaceManagerSparseProfileTest < Minitest::Test
       project = create_git_project_with_dirs(tmp)
       write_workspace_profile(project, <<~TOML)
         [profile]
-        path_template = "{{root}}/checkouts/{{project}}/{{task}}-{{suffix}}"
+        path_template = "{{root}}/checkouts/{{project}}/{{task}}"
         sparse_patterns = ["/src/"]
         sparse_cone = true
       TOML

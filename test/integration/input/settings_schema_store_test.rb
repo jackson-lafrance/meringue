@@ -44,6 +44,34 @@ class InputSettingsSchemaStoreTest < Minitest::Test
     assert_equal ["code", "--wait"], definition.validate_value("code --wait", config: empty_config)
   end
 
+  # Enum normalization used to rewrite every underscore to a hyphen, which meant an
+  # option id that contains one could be read out of the file but never written back:
+  # picking "github_git" in Settings produced "github-git", which its own option list
+  # rejected. Switching the backend away from Git was therefore a one-way door.
+  def test_enum_options_containing_an_underscore_round_trip_through_validation
+    config = empty_config
+
+    %w[version_control.backend workspace.worktree_provider workspace.worktree_provider_fallback].each do |id|
+      definition = Meringue::Config::Schema.fetch(id)
+      definition.option_values(config).each do |option|
+        assert_equal option, definition.validate_value(option, config: config), "#{id} must accept its own option #{option}"
+      end
+    end
+  end
+
+  def test_enum_values_are_matched_case_and_separator_insensitively
+    config = empty_config
+
+    assert_equal "github_git", Meringue::Config::Schema.fetch("version_control.backend").validate_value("GitHub-Git", config: config)
+    assert_equal "rose-pine", Meringue::Config::Schema.fetch("appearance.theme").validate_value("rose_pine", config: config)
+    assert_equal "role-specific", Meringue::Config::Schema.fetch("experiments.agent_defaults_mode").validate_value("role_specific", config: config)
+
+    error = assert_raises(ArgumentError) do
+      Meringue::Config::Schema.fetch("version_control.backend").validate_value("mercurial", config: config)
+    end
+    assert_includes error.message, "must be one of: github_git, command"
+  end
+
   def test_removed_harness_is_absent_from_settings_choices_and_validation
     config = empty_config
     definitions = Meringue::Config::Schema.definitions
@@ -84,14 +112,16 @@ class InputSettingsSchemaStoreTest < Minitest::Test
     end
   end
 
-  def test_transaction_preserves_unknown_keys_and_serializes_role_fallbacks
+  # A key the schema does not know about belongs to whoever wrote it, so a transaction
+  # that rewrites one section must carry the rest of the file across untouched.
+  def test_transaction_preserves_unknown_keys
     with_paths do |config_path, _state_path|
       File.write(config_path, <<~TOML)
         custom = "keep me"
         [plugin.future]
         enabled = true
         [harness.pi]
-        model = "anthropic/claude-opus-5"
+        command = "pi"
       TOML
       store = Meringue::Config::Store.new(path: config_path)
       store.save(
@@ -105,13 +135,16 @@ class InputSettingsSchemaStoreTest < Minitest::Test
       config = Meringue::Config.load(path: config_path)
       assert_equal "keep me", config.value("custom")
       assert_equal true, config.value("plugin", "future", "enabled")
-      assert_equal "anthropic/claude-opus-5", config.value("harness", "pi", "model")
-      assert_equal "openai/gpt-5.6-sol", config.value("harness", "pi", "head_model")
-      assert_nil config.value("harness", "pi", "worker_model")
+      assert_equal "pi", config.value("harness", "pi", "command")
+      assert_equal "openai/gpt-5.6-sol", config.value("harness", "head_model")
+      assert_equal "anthropic/claude-opus-5", config.value("harness", "worker_model")
     end
   end
 
-  def test_equal_role_values_collapse_to_shared_compatibility_keys
+  # Roles are stored independently even when they agree. There is no shared key that a
+  # matching pair collapses into any more, and no provider-scoped one either: writing
+  # both spellings is what let a role-named save report back the value it had replaced.
+  def test_role_values_are_stored_per_role_even_when_they_match
     with_paths do |config_path, _state_path|
       store = Meringue::Config::Store.new(path: config_path)
       store.save(
@@ -125,12 +158,12 @@ class InputSettingsSchemaStoreTest < Minitest::Test
       )
       config = Meringue::Config.load(path: config_path)
 
-      assert_equal "claude", config.value("harness", "provider")
-      assert_nil config.value("harness", "head_provider")
-      assert_nil config.value("harness", "worker_provider")
-      assert_equal "high", config.value("harness", "pi", "thinking_level")
-      assert_nil config.value("harness", "pi", "head_thinking_level")
-      assert_nil config.value("harness", "pi", "worker_thinking_level")
+      assert_equal "claude", config.value("harness", "head_provider")
+      assert_equal "claude", config.value("harness", "worker_provider")
+      assert_equal "high", config.value("harness", "head_thinking_level")
+      assert_equal "high", config.value("harness", "worker_thinking_level")
+      assert_nil config.value("harness", "provider")
+      assert_equal({}, config.section("harness", "pi"))
     end
   end
 
@@ -272,9 +305,9 @@ class InputSettingsSchemaStoreTest < Minitest::Test
     assert_equal "openai/custom-model", draft.value("agent.head_model"), "an explicit model choice must survive a harness switch"
 
     configured = Meringue::Config.new(
-      { "harness" => { "provider" => "codex" } },
+      { "harness" => { "head_provider" => "codex" } },
       path: "/tmp/settings-codex-existing.toml",
-      file_data: { "harness" => { "provider" => "codex" } }
+      file_data: { "harness" => { "head_provider" => "codex" } }
     )
     assert_equal "openai/gpt-5.6-sol", configured.setting("agent.head_model", env: {})
   end
@@ -301,6 +334,59 @@ class InputSettingsSchemaStoreTest < Minitest::Test
       File.write(old_state_path, JSON.generate(Meringue::State::Models.empty_state))
       old_config = Meringue::Config.migrate_settings!(path: old_config_path, state_path: old_state_path)
       assert_equal true, old_config.value("experiments", "github_support")
+    end
+  end
+
+  # Setup and startup have to agree on one schema. Config.reject_obsolete_settings!
+  # refuses to load a file containing any of these paths, so if a writer can still
+  # target one, setup writes configuration that startup then calls obsolete. A dead
+  # canonicalizer used to write harness.provider, harness.model, harness.pi.model,
+  # and both thinking_level paths for exactly that reason.
+  OBSOLETE_WRITE_TARGETS = [
+    %w[harness provider], %w[harness model], %w[harness thinking_level],
+    %w[harness pi model], %w[harness pi thinking_level], %w[harness pi head_model],
+    %w[harness pi worker_model], %w[harness pi head_thinking_level],
+    %w[harness pi worker_thinking_level], %w[tui color_scheme]
+  ].freeze
+
+  def test_no_schema_owned_write_target_is_a_path_startup_rejects
+    owned = Meringue::Config::Schema.definitions.flat_map do |definition|
+      [definition.path, *definition.aliases]
+    end.compact
+
+    OBSOLETE_WRITE_TARGETS.each do |path|
+      refute_includes owned, path,
+                      "#{path.join(".")} is rejected at startup but is still a schema-owned write target"
+    end
+  end
+
+  # The guard above only covers paths the schema names. This one covers the writers
+  # themselves: whatever the store persists for every editable setting must survive a
+  # real load, so no writer can reintroduce a file startup refuses to open.
+  def test_every_editable_setting_the_store_writes_still_loads_at_startup
+    with_paths do |config_path, _state_path|
+      store = Meringue::Config::Store.new(path: config_path)
+      Meringue::Config::Schema.definitions.each do |definition|
+        next if definition.path.nil? || definition.type == "action"
+        next if %w[internal read_only].include?(definition.visibility)
+
+        config = Meringue::Config.load(path: config_path)
+        value = Meringue::Config::Schema.fetch(definition.id).effective_value(config, env: {})
+        next if value.nil?
+
+        begin
+          store.save(base_fingerprint: store.fingerprint, changes: { definition.id => value })
+        rescue Meringue::Config::Store::ValidationError
+          next
+        end
+      end
+
+      # Raises ParseError if any write above landed on an obsolete path.
+      Meringue::Config.load(path: config_path)
+
+      Meringue::Config.reject_obsolete_settings!(
+        Meringue::Config.load(path: config_path).to_file_h, path: config_path
+      )
     end
   end
 

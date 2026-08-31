@@ -426,7 +426,6 @@ class KernelMaintenancePruneMergedPullRequestTest < Minitest::Test
 
   def delivery_pull_request_fields(record)
     {
-      "delivery_pull_request" => record,
       "delivery_pull_requests" => [record],
       "reported_pr_urls" => [record.fetch("url")]
     }

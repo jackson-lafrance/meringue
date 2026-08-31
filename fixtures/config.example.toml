@@ -9,7 +9,7 @@
 # outcome = "completed"   # or "skipped"
 
 [settings]
-schema_version = 1
+schema_version = 2
 
 [experiments]
 # New installations are local-first. Enable this for built-in gh title/status
@@ -39,26 +39,23 @@ colorscheme = "meringue"
 # workspace_close = ["q"]
 
 [harness]
-# provider applies to both head and worker agents unless overridden below.
-provider = "pi"
-# head_provider = "claude"
-# worker_provider = "codex"
+# Heads and workers each name their own harness; there is no shared fallback.
+head_provider = "pi"
+worker_provider = "pi"
+# Model and reasoning defaults are role-scoped and provider-independent. Writing
+# them under a provider table is the old spelling and is refused on load.
+head_model = "anthropic/claude-opus-5"
+worker_model = "anthropic/claude-opus-5"
+head_thinking_level = "max"
+worker_thinking_level = "max"
 
+# A provider table owns how that harness is launched: its command, environment,
+# and per-role arguments. Model and reasoning live under [harness] above.
 [harness.pi]
 command = "pi"
 session_dir = "~/.meringue/pi-sessions"
-# Shared defaults for every future Pi head and worker. `/model` and `/thinking`
-# keep this backward-compatible behavior; role-specific commands write the
-# optional overrides below instead.
-model = "anthropic/claude-opus-5"
-thinking_level = "max"
-# head_model = "openai/gpt-5.6-sol"
-# worker_model = "anthropic/claude-opus-5"
-# head_thinking_level = "low"
-# worker_thinking_level = "max"
-# Role arrays still own tools and other Pi flags; role model/thinking overrides,
-# then the shared scalar fallback, are appended last if arrays contain
-# --model/--thinking.
+# Role arrays own tools and other Pi flags; the role model/thinking values from
+# [harness] are appended last if these arrays contain --model/--thinking.
 head_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve"]
 worker_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls,edit,write", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve"]
 
@@ -79,8 +76,6 @@ worker_extra_args = ["--effort", "high", "--permission-mode", "acceptEdits"]
 
 [harness.codex]
 command = "codex"
-# model = "openai/gpt-5.6-sol"
-# thinking_level = "max"
 head_extra_args = ["--sandbox", "read-only", "--ask-for-approval", "never"]
 worker_extra_args = ["--dangerously-bypass-approvals-and-sandbox"]
 

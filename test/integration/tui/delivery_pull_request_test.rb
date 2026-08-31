@@ -116,7 +116,7 @@ class TuiDeliveryPullRequestTest < Minitest::Test
             "message" => "Worker P1-I1-W1 completed.",
             "details" => {
               "last_assistant_text" => "shipped it",
-              "delivery_pull_request" => { "url" => "https://github.com/o/r/pull/9" }
+              "delivery_pull_requests" => [{ "url" => "https://github.com/o/r/pull/9" }]
             }
           )
         ]
@@ -138,7 +138,7 @@ class TuiDeliveryPullRequestTest < Minitest::Test
   def state_with_pull_request(pull_request_overrides)
     pull_request = { "url" => "https://github.com/o/r/pull/9" }.merge(pull_request_overrides)
     empty_state.merge(
-      "issues" => [issue_record("P1-I1", "delivery_pull_request" => pull_request)],
+      "issues" => [issue_record("P1-I1", "delivery_pull_requests" => [pull_request])],
       "agents" => [agent_record("P1-I1-W1", "issue_id" => "P1-I1")]
     )
   end

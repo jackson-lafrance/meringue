@@ -401,6 +401,9 @@ module E2eSupport
     File.write(File.join(path, "README.md"), "# demo project\n")
     run_git!(path, "add", ".")
     run_git!(path, "commit", "--quiet", "--no-verify", "-m", "initial commit")
+    # Registration requires isolation evidence, and the built-in backend reads it from a
+    # GitHub origin. The URL is never contacted.
+    run_git!(path, "remote", "add", "origin", "git@github.com:example/demo-project.git")
     path
   end
 

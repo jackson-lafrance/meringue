@@ -32,7 +32,8 @@ class InputAgentDefaultsModeTest < Minitest::Test
       agent_defaults_mode = "#{mode}"
 
       [harness]
-      provider = "pi"
+      head_provider = "pi"
+      worker_provider = "pi"
       head_model = "openai/gpt-5.6-sol"
       worker_model = "openai/gpt-5.6-sol"
       head_thinking_level = "high"

@@ -6,11 +6,11 @@ require "support/kernel_heads_support"
 # A head batch journals durable worker reservations, not multi-minute provisioning work. Holding
 # both allocations proves command 2 is applied while command 1's external I/O is still blocked.
 class KernelHeadsAsynchronousWorkerBatchTest < KernelHeadsTestCase
-  class BlockingWorkspaceManager < KernelHeadsSupport::StubWorkspaceManager
+  class BlockingWorkspaceManager < Meringue::Workspace::FakeManager
     attr_reader :allocation_count, :maximum_active
 
-    def initialize
-      super
+    def initialize(root_path:)
+      super(root_path: root_path)
       @mutex = Mutex.new
       @condition = ConditionVariable.new
       @held = true
@@ -57,12 +57,15 @@ class KernelHeadsAsynchronousWorkerBatchTest < KernelHeadsTestCase
   end
 
   def test_one_head_batch_reserves_both_workers_before_either_provision_finishes
-    manager = BlockingWorkspaceManager.new
+    manager = BlockingWorkspaceManager.new(root_path: File.join(@temp_root, "workspaces"))
     async_engine = Meringue::Kernel::Engine.new(
       store: Meringue::State::Store.new(path: @state_path),
       harness_client: @harness_client,
       head_runner: @head_runner,
       workspace_manager: manager,
+      # The blocking manager exists to hold provisioning open; the capability probe is
+      # answered by the fake backend so registration is not part of what is being tested.
+      version_control_backend: Meringue::VersionControl::FakeBackend.new(manager: manager),
       cwd: @project_path,
       forge_client: KernelHeadsSupport::StubForgeClient.new,
       config_path: @config_path,
@@ -104,12 +107,15 @@ class KernelHeadsAsynchronousWorkerBatchTest < KernelHeadsTestCase
   end
 
   def test_head_issue_and_async_worker_show_only_canonical_visible_lifecycle_messages
-    manager = BlockingWorkspaceManager.new
+    manager = BlockingWorkspaceManager.new(root_path: File.join(@temp_root, "workspaces"))
     async_engine = Meringue::Kernel::Engine.new(
       store: Meringue::State::Store.new(path: @state_path),
       harness_client: @harness_client,
       head_runner: @head_runner,
       workspace_manager: manager,
+      # The blocking manager exists to hold provisioning open; the capability probe is
+      # answered by the fake backend so registration is not part of what is being tested.
+      version_control_backend: Meringue::VersionControl::FakeBackend.new(manager: manager),
       cwd: @project_path,
       forge_client: KernelHeadsSupport::StubForgeClient.new,
       config_path: @config_path,

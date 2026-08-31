@@ -159,7 +159,10 @@ class KernelMaintenanceRecountReferenceIntegrityTest < Minitest::Test
   # predecessor must start the renamed dependent with the handover prompt.
   def test_a_queued_worker_still_activates_after_a_recount
     write_state(referenced_state)
-    engine = build_engine
+    # Activating the dependent provisions a workspace, and these fixtures are directories
+    # rather than repositories, so the isolated workspace is faked. What is under test is
+    # the chain surviving a rename, not the worktree.
+    engine = build_engine(workspace_manager: Meringue::Workspace::FakeManager.new(root_path: tmp_path("workspaces")))
     apply_command(engine, "Recount", {})
 
     engine.mark_worker_completed(agent_id: "P1-I1-W1", last_assistant_text: "The bug is in SignupsController.")

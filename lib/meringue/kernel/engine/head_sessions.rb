@@ -575,7 +575,7 @@ module Meringue
         @async_heads
       end
 
-      def import_project!(state, bundle, project_path, payload)
+      def import_project!(state, bundle, project_path, payload, capability: {})
         expanded = File.expand_path(project_path.to_s)
         existing = state.fetch("projects").find do |project|
           project.is_a?(Hash) && project["root_path"] && File.expand_path(project["root_path"].to_s) == expanded
@@ -589,6 +589,12 @@ module Meringue
           "name" => project_display_name(value_at(payload, "project_name", "projectName")) ||
                     project_display_name(first_project["name"]) || default_project_name(expanded),
           "root_path" => expanded,
+          # The same isolation evidence registration records, so an imported worker can be
+          # given a workspace.
+          "version_control_backend" => capability.fetch("backend", @version_control_backend.id),
+          "version_control_repository_identity" => capability["repository_identity"],
+          "version_control_capabilities" => capability.fetch("capabilities", {}),
+          "version_control_diagnostic_at" => capability["diagnostic_at"],
           "status" => "working",
           "portable_import" => {
             "bundle_id" => bundle.fetch("bundle_id", nil),

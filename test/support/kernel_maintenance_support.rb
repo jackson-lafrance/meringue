@@ -267,6 +267,10 @@ module KernelMaintenanceSupport
       head_runner: head_runner,
       harness_client_resolver: harness_client_resolver,
       workspace_manager: workspace_manager,
+      # Fixture projects are directories, not repositories: the capability probe and the
+      # isolated workspace are both faked so these tests stay about maintenance. Tests
+      # that are about real worktrees pass a real Workspace::Manager instead.
+      version_control_backend: Meringue::VersionControl::FakeBackend.new(manager: workspace_manager),
       cwd: @kernel_maintenance_tmp,
       forge_client: forge_client,
       prune_forge_lookup_budget: prune_forge_lookup_budget,
@@ -321,8 +325,11 @@ module KernelMaintenanceSupport
     Array(records).filter_map { |record| record.fetch("id", "").to_s[pattern, 1]&.to_i }.max || 0
   end
 
-  def project_record(id:, root_path: nil, name: nil, status: "completed", created_at: BASE_TIME)
-    {
+  # Registration records isolation evidence on the project, so a fixture project carries
+  # it too. `isolated: false` models a record written before that contract existed, which
+  # reconciliation re-probes.
+  def project_record(id:, root_path: nil, name: nil, status: "completed", created_at: BASE_TIME, isolated: true)
+    record = {
       "id" => id,
       "name" => name || "Project #{id}",
       "root_path" => root_path || make_dir("projects", id),
@@ -330,6 +337,14 @@ module KernelMaintenanceSupport
       "created_at" => created_at,
       "updated_at" => created_at
     }
+    return record unless isolated
+
+    record.merge(
+      "version_control_backend" => "github_git",
+      "version_control_repository_identity" => "git@github.com:example/#{id.downcase}.git",
+      "version_control_capabilities" => { "isolated_workspaces" => true, "mutable_workspace" => true },
+      "version_control_diagnostic_at" => created_at
+    )
   end
 
   def issue_record(id:, project_id:, status: "completed", title: nil, parent_issue_id: nil, agent_ids: [],
@@ -473,7 +488,6 @@ module KernelMaintenanceSupport
       agent_ids: agent_ids,
       parent_issue_id: parent_issue_id,
       extra: {
-        "delivery_pull_request" => { "url" => url, "state" => "open" },
         "delivery_pull_requests" => [{ "url" => url, "state" => "open" }],
         "reported_pr_urls" => [url]
       }

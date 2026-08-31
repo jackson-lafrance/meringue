@@ -381,6 +381,11 @@ module Meringue
       GOAL_COMPARATOR_TEXT = { "gte" => ">=", "lte" => "<=", "gt" => ">", "lt" => "<", "eq" => "==" }.freeze
       GATE_LABEL_MAX_CHARS = 48
       HEAD_RECONCILE_ERROR_GRACE_SECONDS = 30
+      # How long a head record may exist without a recorded harness session before reconciliation
+      # is willing to judge it. Sized to outlast the slowest supported head spawn rather than to a
+      # reconcile tick: ClaudeInteractiveClient::READY_TIMEOUT is 120s and prompt delivery follows
+      # it, so the 30s error grace above would reopen the same race on a slow machine.
+      HEAD_SESSION_SPAWN_GRACE_SECONDS = 180
       HEAD_RECONCILE_WARNING_DELAY_SECONDS = 5
       # Token-overlap ratio above which two clarifications from the same head are treated as
       # one restated question instead of two separate questions.
@@ -659,6 +664,11 @@ module Meringue
       # on disk after their worker records are removed. A post-commit retry runs the same safe
       # removal with a fresh budget and never force-removes dirty, locked, or referenced worktrees.
       POST_PRUNE_CLEANUP_BUDGET_SECONDS = 30.0
+      # A project that reports no isolated-workspace capability is re-probed on this
+      # cadence rather than on every 2-second pass: the probe shells out to git, and a
+      # project that is genuinely unbackable would otherwise pay for it continuously.
+      # Projects that already carry isolation evidence are never re-probed.
+      PROJECT_VERSION_CONTROL_REPROBE_INTERVAL_SECONDS = 60
       # Harness model catalogs change when a user logs into a provider, installs an
       # extension, or edits models.json, so a persisted snapshot is refreshed
       # periodically in the background instead of on every completion keystroke.

@@ -18,8 +18,8 @@ class InputConfigTest < Minitest::Test
     agent_select_next = ["j", "down"]
 
     [harness]
-    provider = "pi"
     head_provider = "claude"
+    worker_provider = "pi"
 
     [harness.pi]
     command = "pi"
@@ -57,7 +57,7 @@ class InputConfigTest < Minitest::Test
       assert_equal path, config.path
       assert_equal "gruvbox", config.value("tui", "colorscheme")
       assert_equal "claude", config.value("harness", "head_provider")
-      assert_equal "pi", config.value("harness", "provider")
+      assert_equal "pi", config.value("harness", "worker_provider")
       assert_equal %w[j down], config.value("tui", "keybindings", "agent_select_next")
       assert_equal ["--model", "anthropic/claude-opus-5"], config.value("harness", "pi", "head_extra_args")
       assert_equal true, config.value("harness", "pi", "use_json_schema")
@@ -99,6 +99,36 @@ class InputConfigTest < Minitest::Test
     end
   end
 
+  # The rejection used to name the leaf key, so the same sentence said `head_model`
+  # was obsolete and that `harness.head_model` was the replacement. What was actually
+  # stale was the provider-scoped `harness.pi.head_model`.
+  def test_obsolete_settings_are_reported_as_full_paths
+    Dir.mktmpdir("meringue-config-test") do |dir|
+      contents = <<~TOML
+        [harness]
+        provider = "pi"
+        head_model = "openai-codex/gpt-5.6-sol"
+
+        [harness.pi]
+        head_model = "pi/legacy"
+        worker_thinking_level = "medium"
+
+        [tui]
+        color_scheme = "gruvbox"
+      TOML
+      path = write_config(File.join(dir, "config.toml"), contents)
+
+      error = assert_raises(Meringue::Config::ParseError) { Meringue::Config.load(path: path) }
+
+      assert_includes error.message, path
+      reported = error.message[/settings in .+?: (.+?)\. Delete/, 1].split(", ")
+
+      # Every entry is a full path, and the current `harness.head_model` this file also
+      # sets is not among them.
+      assert_equal %w[harness.pi.head_model harness.pi.worker_thinking_level harness.provider tui.color_scheme], reported.sort
+    end
+  end
+
   def test_comments_and_quoting_are_handled
     Dir.mktmpdir("meringue-config-test") do |dir|
       contents = <<~TOML
@@ -120,14 +150,14 @@ class InputConfigTest < Minitest::Test
     Dir.mktmpdir("meringue-config-test") do |dir|
       config = Meringue::Config.load(path: write_config(File.join(dir, "config.toml"), FULL_CONFIG))
 
-      merged = config.with_overrides("harness" => { "provider" => "claude" })
+      merged = config.with_overrides("harness" => { "worker_provider" => "claude" })
 
-      assert_equal "claude", merged.value("harness", "provider")
+      assert_equal "claude", merged.value("harness", "worker_provider")
       assert_equal "claude", merged.value("harness", "head_provider")
       assert_equal "pi", merged.value("harness", "pi", "command")
       assert_equal "gruvbox", merged.value("tui", "colorscheme")
 
-      assert_equal "pi", config.value("harness", "provider")
+      assert_equal "pi", config.value("harness", "worker_provider")
       assert_equal config.path, merged.path
       assert_equal config.loaded?, merged.loaded?
     end
@@ -180,7 +210,7 @@ class InputConfigTest < Minitest::Test
   def test_unsupported_provider_is_rejected
     Dir.mktmpdir("meringue-config-test") do |dir|
       config = Meringue::Config.load(
-        path: write_config(File.join(dir, "config.toml"), "[harness]\nprovider = \"nope\"\n")
+        path: write_config(File.join(dir, "config.toml"), "[harness]\nhead_provider = \"nope\"\n")
       )
       registry = Meringue::Harness::Registry.new(config: config)
 
@@ -201,9 +231,9 @@ class InputConfigTest < Minitest::Test
     assert_equal "", Meringue::Harness::Registry.normalize_provider(nil)
   end
 
-  def test_saving_a_theme_writes_colorscheme_and_drops_the_legacy_alias
+  def test_saving_a_theme_writes_colorscheme
     Dir.mktmpdir("meringue-config-test") do |dir|
-      path = write_config(File.join(dir, "config.toml"), "[tui]\ncolor_scheme = \"tokyonight\"\n")
+      path = write_config(File.join(dir, "config.toml"), "[tui]\ncolorscheme = \"tokyonight\"\n")
 
       saved = Meringue::Config.save_tui_theme!("gruvbox", path: path)
 
@@ -213,6 +243,19 @@ class InputConfigTest < Minitest::Test
       refute_includes contents, "color_scheme"
       assert_equal "gruvbox", Meringue::Config.load(path: path).value("tui", "colorscheme")
       assert_empty Dir.glob(File.join(dir, "*.tmp.*"))
+    end
+  end
+
+  # `tui.color_scheme` is not migrated on the reader's behalf any more: it is one of the
+  # obsolete spellings the loader refuses outright, so saving over it never gets far
+  # enough to rewrite it.
+  def test_the_legacy_theme_alias_is_refused_rather_than_migrated
+    Dir.mktmpdir("meringue-config-test") do |dir|
+      path = write_config(File.join(dir, "config.toml"), "[tui]\ncolor_scheme = \"tokyonight\"\n")
+
+      error = assert_raises(Meringue::Config::ParseError) { Meringue::Config.save_tui_theme!("gruvbox", path: path) }
+
+      assert_includes error.message, "tui.color_scheme"
     end
   end
 
@@ -227,7 +270,9 @@ class InputConfigTest < Minitest::Test
     end
   end
 
-  def test_saving_pi_session_defaults_preserves_unrelated_config_and_role_arguments
+  # Model and reasoning defaults are role-scoped and provider-independent, so a save
+  # writes them under [harness] and leaves the provider table's launch arguments alone.
+  def test_saving_agent_session_defaults_preserves_unrelated_config_and_role_arguments
     Dir.mktmpdir("meringue-config-test") do |dir|
       path = write_config(File.join(dir, "config.toml"), FULL_CONFIG)
 
@@ -237,31 +282,34 @@ class InputConfigTest < Minitest::Test
         path: path
       )
 
-      assert_equal "openai/gpt-5.6-sol", saved.value("harness", "pi", "model")
-      assert_equal "xhigh", saved.value("harness", "pi", "thinking_level")
+      assert_equal "openai/gpt-5.6-sol", saved.value("harness", "head_model")
+      assert_equal "openai/gpt-5.6-sol", saved.value("harness", "worker_model")
+      assert_equal "xhigh", saved.value("harness", "head_thinking_level")
+      assert_equal "xhigh", saved.value("harness", "worker_thinking_level")
       assert_equal ["--model", "anthropic/claude-opus-5"], saved.value("harness", "pi", "head_extra_args")
       assert_equal "gruvbox", saved.value("tui", "colorscheme")
       reloaded = Meringue::Config.load(path: path)
-      assert_equal "openai/gpt-5.6-sol", reloaded.value("harness", "pi", "model")
-      assert_equal "xhigh", reloaded.value("harness", "pi", "thinking_level")
+      assert_equal "openai/gpt-5.6-sol", reloaded.value("harness", "head_model")
+      assert_equal "xhigh", reloaded.value("harness", "worker_thinking_level")
     end
   end
 
-  def test_saving_role_specific_thinking_defaults_preserves_shared_compatibility_and_shared_save_resets_overrides
+  # The default mode keeps the roles independent, so a role-less save writes both keys
+  # and a role-named save moves only that role.
+  def test_saving_role_specific_thinking_defaults_writes_only_the_named_role
     Dir.mktmpdir("meringue-config-test") do |dir|
       path = File.join(dir, "config.toml")
-      Meringue::Config.save_agent_session_defaults!(thinking_level: "medium", path: path)
+      shared = Meringue::Config.save_agent_session_defaults!(thinking_level: "medium", path: path)
+
+      assert_equal "medium", shared.value("harness", "head_thinking_level")
+      assert_equal "medium", shared.value("harness", "worker_thinking_level")
+
       Meringue::Config.save_agent_session_defaults!(thinking_level: "low", thinking_role: "head", path: path)
       split = Meringue::Config.save_agent_session_defaults!(thinking_level: "xhigh", thinking_role: "worker", path: path)
 
-      assert_equal "medium", split.value("harness", "pi", "thinking_level")
-      assert_equal "low", split.value("harness", "pi", "head_thinking_level")
-      assert_equal "xhigh", split.value("harness", "pi", "worker_thinking_level")
-
-      shared = Meringue::Config.save_agent_session_defaults!(thinking_level: "high", path: path)
-      assert_equal "high", shared.value("harness", "pi", "thinking_level")
-      assert_nil shared.value("harness", "pi", "head_thinking_level")
-      assert_nil shared.value("harness", "pi", "worker_thinking_level")
+      assert_equal "low", split.value("harness", "head_thinking_level")
+      assert_equal "xhigh", split.value("harness", "worker_thinking_level")
+      assert_equal "xhigh", Meringue::Config.load(path: path).value("harness", "worker_thinking_level")
     end
   end
 
@@ -272,14 +320,12 @@ class InputConfigTest < Minitest::Test
       Meringue::Config.save_agent_session_defaults!(model: "openai/gpt-5.6-sol", model_role: "head", path: path)
       split = Meringue::Config.save_agent_session_defaults!(model: "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", model_role: "worker", path: path)
 
-      assert_equal "anthropic/claude-opus-5", split.value("harness", "pi", "model")
-      assert_equal "openai/gpt-5.6-sol", split.value("harness", "pi", "head_model")
-      assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", split.value("harness", "pi", "worker_model")
+      assert_equal "openai/gpt-5.6-sol", split.value("harness", "head_model")
+      assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", split.value("harness", "worker_model")
 
       shared = Meringue::Config.save_agent_session_defaults!(model: "openai/gpt-5.6-sol", path: path)
-      assert_equal "openai/gpt-5.6-sol", shared.value("harness", "pi", "model")
-      assert_nil shared.value("harness", "pi", "head_model")
-      assert_nil shared.value("harness", "pi", "worker_model")
+      assert_equal "openai/gpt-5.6-sol", shared.value("harness", "head_model")
+      assert_equal "openai/gpt-5.6-sol", shared.value("harness", "worker_model")
     end
   end
 
@@ -312,15 +358,15 @@ class InputConfigTest < Minitest::Test
     ).worker_provisioning_concurrency
   end
 
-  def test_saving_one_pi_session_default_preserves_the_other
+  def test_saving_one_agent_session_default_preserves_the_other
     Dir.mktmpdir("meringue-config-test") do |dir|
       path = File.join(dir, "config.toml")
       Meringue::Config.save_agent_session_defaults!(model: "openai/gpt-5.6-sol", thinking_level: "high", path: path)
 
       saved = Meringue::Config.save_agent_session_defaults!(thinking_level: "xhigh", path: path)
 
-      assert_equal "openai/gpt-5.6-sol", saved.value("harness", "pi", "model")
-      assert_equal "xhigh", saved.value("harness", "pi", "thinking_level")
+      assert_equal "openai/gpt-5.6-sol", saved.value("harness", "head_model")
+      assert_equal "xhigh", saved.value("harness", "head_thinking_level")
     end
   end
 
@@ -329,7 +375,8 @@ class InputConfigTest < Minitest::Test
 
     assert config.loaded?
     assert_equal "meringue", config.value("tui", "colorscheme")
-    assert_equal "pi", config.value("harness", "provider")
+    assert_equal "pi", config.value("harness", "head_provider")
+    assert_equal "pi", config.value("harness", "worker_provider")
     assert_equal "pi", config.value("harness", "pi", "command")
     assert_includes config.value("harness", "pi", "head_extra_args"), "--thinking"
     assert_equal ["."], config.value("workspace", "editor_args")
@@ -343,14 +390,14 @@ class InputConfigTest < Minitest::Test
       path = File.join(dir, "written.toml")
       data = {
         "tui" => { "colorscheme" => "meringue" },
-        "harness" => { "provider" => "pi", "pi" => { "retries" => 2, "use_json_schema" => false, "args" => %w[a b] } }
+        "harness" => { "head_provider" => "pi", "pi" => { "retries" => 2, "use_json_schema" => false, "args" => %w[a b] } }
       }
 
       Meringue::Config.write_toml(path, data)
       config = Meringue::Config.load(path: path)
 
       assert_equal "meringue", config.value("tui", "colorscheme")
-      assert_equal "pi", config.value("harness", "provider")
+      assert_equal "pi", config.value("harness", "head_provider")
       assert_equal 2, config.value("harness", "pi", "retries")
       assert_equal false, config.value("harness", "pi", "use_json_schema")
       assert_equal %w[a b], config.value("harness", "pi", "args")

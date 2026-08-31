@@ -20,18 +20,7 @@ class FoundationSourceLayoutTest < Minitest::Test
   # Files that predate the ceiling. Each entry is the size it may not exceed, so these can shrink
   # or be split but never grow by accident. Raising one is allowed, but it has to be an edit to
   # this list with a reason - which is the whole mechanism. Splitting one means deleting its entry.
-  GRANDFATHERED = {
-    "lib/meringue/workspace/manager.rb" => 3_183,
-    "lib/meringue/harness/pi_client.rb" => 2_599,
-    # Lowered when the empty-pane copy moved to tui/first_run.rb. These may
-    # shrink but never grow, so the reclaimed room is locked in rather than left
-    # as headroom for the next accidental addition.
-    "lib/meringue/tui/panes/chat_pane.rb" => 2_020,
-    "lib/meringue/tui/layout.rb" => 1_522,
-    # +3 for /glossary: one row in the command table and its two-line local-command
-    # rejection, the same shape every other TUI-local command already has here.
-    "lib/meringue/input/slash_command_parser.rb" => 1_305
-  }.freeze
+  GRANDFATHERED = {}.freeze
 
   def test_no_source_file_grows_past_the_ceiling
     offenders = source_files.filter_map do |path, length|
