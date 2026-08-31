@@ -59,8 +59,7 @@ module Meringue
       end
 
       # Either kind of focus means a person owns this session's prompt box right now. A
-      # dashboard-issued prompt would be typed into the same box they are typing into, so it is
-      # refused with an explanation rather than interleaved.
+      # dashboard-issued prompt waits in the durable queue rather than interleaving with that input.
       def agent_focus_ownership_active?(agent)
         interactive_focus_active?(agent) || live_focus_attached?(agent)
       end

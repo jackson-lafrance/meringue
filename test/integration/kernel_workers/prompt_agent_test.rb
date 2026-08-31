@@ -386,7 +386,7 @@ class KernelWorkersPromptAgentTest < Minitest::Test
     result = apply_raw(engine, "PromptAgent", { "agent_id" => worker_id, "prompt" => "Go." })
 
     assert_equal "rejected", result.fetch("status")
-    assert_includes result.fetch("errors"), "agent_not_resumable"
+    assert_includes result.fetch("errors"), "agent_killed"
     assert_empty @harness_client.prompts
   end
 
@@ -463,7 +463,7 @@ class KernelWorkersPromptAgentTest < Minitest::Test
     assert_equal "Add the migration.", pending.fetch(0).fetch("prompt")
     assert_equal "normal", pending.fetch(0).fetch("mode")
     assert_equal 1, pending.fetch(0).fetch("attempts")
-    assert_includes log_messages(engine), "Waiting to deliver the prompt for worker #{worker_id} until its current turn settles."
+    assert_includes log_messages(engine), "Queued the prompt for worker #{worker_id} until its current turn settles."
 
     @harness_client.prompt_error = nil
     apply!(engine, "ReconcileSessions", {})
@@ -505,9 +505,9 @@ class KernelWorkersPromptAgentTest < Minitest::Test
     end
 
     assert_equal "accepted", result.fetch("status")
-    assert_equal "steer", result.fetch("session_prompt_mode")
-    assert_equal "steer", @harness_client.prompts.fetch(0).fetch("mode")
-    assert_equal "steer_active_session", agent(engine, worker_id).fetch("harness_metadata").fetch("routing_action")
+    assert_equal "follow_up", result.fetch("session_prompt_mode")
+    assert_equal "follow_up", @harness_client.prompts.fetch(0).fetch("mode")
+    assert_equal "queue_follow_up", agent(engine, worker_id).fetch("harness_metadata").fetch("routing_action")
   end
 
   def test_worker_session_service_rejects_an_empty_prompt_without_touching_the_harness

@@ -236,7 +236,7 @@ module Meringue
           return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
           return rejected_result(command_id, command_type, "Agent #{agent_id} is killed.", ["agent_killed"]) if agent.fetch("status", nil) == "killed"
           return rejected_result(command_id, command_type, "Agent #{agent_id} has no agent session.", ["missing_harness_session"]) unless agent_has_session_reference?(agent)
-          return rejected_result(command_id, command_type, "Agent #{agent_id} is owned by its Agent session; return to the dashboard before pausing it.", ["interactive_focus_active"]) if agent_focus_ownership_active?(agent)
+          focus_owned = agent_focus_ownership_active?(agent)
 
           metadata = agent.fetch("harness_metadata", {}) || {}
           if agent.fetch("status", nil) == "paused" && !metadata.fetch("pause_request", nil).is_a?(Hash)
@@ -272,9 +272,20 @@ module Meringue
           agent["updated_at"] = timestamp
           touch_state!(state)
           store.save(state)
-          deep_copy(agent)
+          deep_copy(agent).merge("_focus_owned" => focus_owned)
         end
         return operation unless operation.is_a?(Hash) && operation.fetch("type", nil) == "worker"
+        if operation.delete("_focus_owned")
+          operation["pause_queued"] = true
+          return accepted_result(
+            command_id,
+            command_type,
+            operation.fetch("id"),
+            "Queued pause for worker #{operation.fetch("id")} until its focused Agent session returns.",
+            operation,
+            []
+          )
+        end
 
         client = harness_client_for_agent(operation)
         session_ref = agent_session_ref(operation)
@@ -364,7 +375,6 @@ module Meringue
           return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
           return rejected_result(command_id, command_type, "Agent #{agent_id} is killed.", ["agent_killed"]) if agent.fetch("status", nil) == "killed"
           return rejected_result(command_id, command_type, "Agent #{agent_id} has no agent session.", ["missing_harness_session"]) unless agent_has_session_reference?(agent)
-          return rejected_result(command_id, command_type, "Agent #{agent_id} is owned by its Agent session; return to the dashboard before resuming it.", ["interactive_focus_active"]) if agent_focus_ownership_active?(agent)
 
           metadata = agent.fetch("harness_metadata", {}) || {}
           request = metadata.fetch("resume_request", nil)
@@ -544,6 +554,7 @@ module Meringue
             request = (agent.fetch("harness_metadata", {}) || {}).fetch("pause_request", nil)
             next unless request.is_a?(Hash)
             next if operation_owned_by_other_live_instance?(request)
+            next if agent_focus_ownership_active?(agent)
 
             deep_copy(agent)
           end
@@ -560,6 +571,7 @@ module Meringue
             request = (agent.fetch("harness_metadata", {}) || {}).fetch("resume_request", nil)
             next unless request.is_a?(Hash)
             next if operation_owned_by_other_live_instance?(request)
+            next if agent_focus_ownership_active?(agent)
 
             deep_copy(agent)
           end

@@ -32,8 +32,8 @@ module Meringue
       end
 
       # Starts a workspace transition without making the TUI input/render thread wait for a
-      # harness handoff. An agent session may need to abort an active turn and wait for its
-      # transport, so that work belongs on a controller-owned thread.
+      # harness handoff or native-session attach. Any provider coordination belongs on a
+      # controller-owned thread.
       def open_workspace_async(agent:, state: nil, rows: TerminalSession::DEFAULT_ROWS, columns: TerminalSession::DEFAULT_COLUMNS, &callback)
         key = agent_key(agent)
         operation = { "cancelled" => false }
@@ -59,9 +59,9 @@ module Meringue
         }
       end
 
-      # Returning ownership can wait for the focused harness process to settle, stop its PTY, and
-      # restore dashboard transport. Keep that bounded work off the TUI input/render thread while
-      # the durable kernel handoff marker continues enforcing one writer.
+      # Returning ownership can wait for the focused harness process to stop its PTY and restore
+      # dashboard transport. Keep that bounded work off the TUI input/render thread while the
+      # durable kernel handoff marker continues enforcing one writer.
       def close_workspace_async(agent:, &callback)
         key = agent_key(agent)
         operation = nil

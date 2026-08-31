@@ -70,17 +70,10 @@ module Meringue
       end
 
       def stale_interactive_focus_recovery_marker(marker, original_state)
-        return marker unless original_state.to_s == "preparing"
-        return marker unless marker.fetch("managed_turn_was_streaming", false)
-        return marker if marker.fetch("handoff", nil).is_a?(Hash)
-
-        marker.merge(
-          "handoff" => {
-            "continuation_required" => true,
-            "prompt" => WORKER_RESUME_PROMPT.strip,
-            "recovery" => "dashboard_restart_during_focus_preparation"
-          }
-        )
+        # A crashed dashboard must not turn focus recovery into a new user message. The durable
+        # session remains the source of truth; returning ownership never submits a continuation.
+        _ = original_state
+        marker
       end
 
       def mark_stale_interactive_focus_recovery_failed(agent_id, exception)
@@ -117,7 +110,7 @@ module Meringue
       #   "live_terminal" - the session already runs in an interactive process Meringue owns, and
       #                     focusing it is a pure attach.
       #   "session_view"  - the existing managed transport stays live while its transcript renders.
-      #   "handoff"       - the backend can transfer its live transport without interrupting it.
+      #   "handoff"       - the backend can provide native focus while preserving its live session.
       #   "none"          - the backend has no focusable session.
       def agent_focus_mode(agent_id)
         agent = synchronized_state { find_agent(normalized_state, agent_id.to_s) }
@@ -251,20 +244,18 @@ module Meringue
       end
 
       # A focused Agent session writes directly to its provider PTY, so it does not pass through the
-      # dashboard PromptAgent command. Enter is the durable boundary at which the kernel can expose a
-      # completed worker as active; reconciliation later confirms whether the submitted turn is still
-      # streaming or has already completed.
+      # dashboard PromptAgent command. Enter is the durable boundary at which the kernel records user
+      # activity; reconciliation later confirms whether the submitted turn is still streaming.
       def note_agent_interactive_prompt(agent_id)
         synchronized_state do
           state = normalized_state
           current = find_agent(state, agent_id.to_s)
           return rejected_result(nil, "FocusPrompt", "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless current
           return rejected_result(nil, "FocusPrompt", "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless current.fetch("type", nil) == "worker"
-          return accepted_result(nil, "FocusPrompt", current.fetch("id"), "Worker #{current.fetch("id")} is already #{current.fetch("status")}.", deep_copy(current), []) unless current.fetch("status", nil) == "completed"
           return rejected_result(nil, "FocusPrompt", "Worker #{agent_id} has no resumable agent session.", ["missing_harness_session"]) unless agent_has_session_reference?(current)
 
           now = timestamp
-          current["status"] = "working"
+          current["status"] = "working" unless current.fetch("status", nil) == "killed"
           current["updated_at"] = now
           current["harness_metadata"] = (current.fetch("harness_metadata", {}) || {}).merge(
             "is_streaming" => true,
@@ -277,9 +268,9 @@ module Meringue
         end
       end
 
-      # The Agent session is a kernel-owned transport transition, not a TUI-side attach. The managed
-      # RPC writer is quiesced before the workspace controller launches the interactive PTY, and a
-      # durable marker makes reconciliation stand down while that PTY owns the session file.
+      # The Agent session is a kernel-owned focus transition, not a TUI-side prompt. Pi opens its
+      # existing durable session in native mode while the managed transport remains untouched, and
+      # a durable marker makes reconciliation stand down while the focused PTY owns user input.
       def begin_agent_interactive_focus(agent_id)
         reclaim_pid = nil
         reclaim_started_at = nil
@@ -353,9 +344,9 @@ module Meringue
           prepared_ref = prepared.fetch("session_ref", {})
           merge_session_ref_into_agent!(current, prepared_ref) unless prepared_ref.empty?
           marker = (current.fetch("harness_metadata", {}) || {}).fetch("interactive_handoff", {}) || {}
-          current["pid"] = nil
+          # `prepared_ref` points at the same managed session. Keep its pid and streaming state so
+          # dashboard return can read the original transport instead of treating focus as a restart.
           current["harness_metadata"] = (current.fetch("harness_metadata", {}) || {}).merge(
-            "is_streaming" => false,
             "interactive_handoff" => marker.merge(
               "state" => "interactive_pending",
               "session_ref" => prepared.fetch("session_ref", {}),
@@ -371,7 +362,7 @@ module Meringue
             nil,
             "BeginInteractiveFocus",
             current.fetch("id"),
-            "Prepared worker #{current.fetch("id")} for an Agent session.",
+            "Attached worker #{current.fetch("id")} to its native Agent session.",
             {
               "interactive_argv" => prepared.fetch("interactive_argv"),
               "interactive_executable" => prepared.fetch("interactive_executable", nil),
@@ -386,10 +377,8 @@ module Meringue
       rescue StandardError => e
         recovered_ref = nil
         recovery_error = nil
-        # Preparation may already have quiesced the RPC writer. If no orphaned native
-        # process is still being reclaimed, restore dashboard ownership before clearing the marker.
-        # This makes launch/preparation failure a settled, resumable worker rather than a stale
-        # `working` record with no supervisor.
+        # Preparation only reads the managed session. If native launch fails, restore the durable
+        # dashboard marker without submitting a message or changing the existing worker turn.
         unless reclaim_pid && !reclaim_completed
           begin
             client ||= harness_client_for_agent(agent) if agent.is_a?(Hash)
@@ -464,11 +453,12 @@ module Meringue
             "interactive_started_at" => process&.fetch("started_at", nil)&.iso8601 || now
           )
           marker.delete("reclaim_interactive_pid")
+          streaming = !!marker.fetch("managed_turn_was_streaming", metadata.fetch("is_streaming", false))
           agent["harness_metadata"] = metadata.merge(
-            "is_streaming" => true,
+            "is_streaming" => streaming,
             "interactive_handoff" => marker
           )
-          agent["status"] = "working" unless TERMINAL_AGENT_STATUSES.include?(agent.fetch("status", nil))
+          agent["status"] = "working" if streaming && !TERMINAL_AGENT_STATUSES.include?(agent.fetch("status", nil))
           agent["updated_at"] = now
           touch_state!(state, now)
           store.save(state)

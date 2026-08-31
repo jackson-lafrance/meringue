@@ -114,8 +114,8 @@ module Meringue
           current_handle.poll_events(limit: limit)
         end
 
-        # mode: "auto" matches a native coding-agent editor: an active turn is
-        # steered, while idle/completed history receives a normal continuation.
+        # mode: "auto" preserves the current turn: an active turn receives a
+        # follow-up, while idle/completed history receives a normal continuation.
         def submit(prompt, mode: "auto")
           return invalid_result("Heads cannot receive focused prompts.", "head_session_read_only") if head_session?
 
@@ -204,7 +204,7 @@ module Meringue
         end
 
         def automatic_prompt_mode(snapshot)
-          snapshot.fetch("session_state", "unknown") == "streaming" ? "steer" : "normal"
+          snapshot.fetch("session_state", "unknown") == "streaming" ? "follow_up" : "normal"
         end
 
         def rebind_view

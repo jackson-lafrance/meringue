@@ -158,15 +158,53 @@ module Meringue
         raise
       end
 
-      # Pi workers stay in their existing RPC process while focused. The managed session view reads
-      # that process and its saved transcript, so focus entry cannot abort a turn, replace Pi, or
-      # turn command-line text into a synthetic user message.
+      # Pi's native TUI opens the same durable session file that the managed RPC process owns.
+      # Focus preparation only builds that attach command; it never sends a prompt or changes the
+      # existing RPC turn.
       def managed_session_view_supported?
-        true
+        false
       end
 
       def interactive_session_supported?
-        false
+        true
+      end
+
+      def prepare_interactive_session(session_ref)
+        current_ref = preserve_session_identity(get_state(session_ref), session_ref)
+        current_ref = current_ref.merge(
+          "metadata" => metadata_with(session_ref, current_ref.fetch("metadata", {}))
+        )
+        interactive_argv = interactive_session_argv(current_ref)
+        interactive_env = process_environment(current_ref.fetch("cwd", Dir.pwd))
+        interactive_executable = resolve_interactive_executable(
+          interactive_argv,
+          cwd: current_ref.fetch("cwd", Dir.pwd),
+          environment: interactive_env
+        )
+        {
+          "session_ref" => current_ref,
+          "interactive_argv" => interactive_argv,
+          "interactive_executable" => interactive_executable,
+          "interactive_env" => interactive_env,
+          "handoff" => {
+            "mode" => "native_interactive",
+            "transfer" => "shared_session_attach",
+            "was_streaming" => !!current_ref.fetch("is_streaming", false),
+            "exact_stream_transfer" => !current_ref.fetch("is_streaming", false),
+            "continuation_required" => false
+          }
+        }
+      end
+
+      # Focus owns only the native viewer. The managed RPC process remains the dashboard's live
+      # transport, so returning to the dashboard reads that process without injecting a continuation.
+      def resume_dashboard_session(session_ref, handoff: nil)
+        _ = handoff
+        process = process_for_session(session_ref, required: false)
+        resumed_ref = process ? get_state(session_ref) : attach_session(session_ref)
+        preserve_session_identity(resumed_ref, session_ref).merge(
+          "metadata" => metadata_with(session_ref, resumed_ref.fetch("metadata", {}))
+        )
       end
 
       def reclaim_interactive_session(session_ref, pid:)
