@@ -191,6 +191,7 @@ module Meringue
           session_name: session_name,
           workspace_mode: workspace_mode
         )
+        session_ref = record_requested_session_model(session_ref, option_value(argv, "--model"))
         claim_transport(session_ref, note: "spawned")
 
         return session_ref unless present?(prompt)
@@ -405,13 +406,17 @@ module Meringue
         if process
           begin
             state = rpc_data(process.request({ "type" => "get_state" }, timeout: command_timeout))
-            return build_session_ref(
+            current_ref = build_session_ref(
               process,
               state,
               kind: metadata_value(session_ref, "kind"),
               cwd: session_ref.fetch("cwd", process.cwd),
               session_name: metadata_value(session_ref, "session_name") || state["sessionName"],
               workspace_mode: metadata_value(session_ref, "workspace_mode") || "isolated"
+            )
+            return record_requested_session_model(
+              current_ref,
+              metadata_value(session_ref, "requested_session_model")
             )
           rescue ProcessExitedError
             # The wait thread and an RPC-state read can cross by a few instructions. Once request
@@ -509,9 +514,9 @@ module Meringue
             timeout: command_timeout
           )
         )
-        updated_ref = get_state(state_ref)
+        requested_reference = ModelReference.format(provider: provider, id: model_id)
+        updated_ref = record_requested_session_model(get_state(state_ref), requested_reference)
         effective_reference = updated_ref.dig("session_settings", "model", "reference")
-        requested_reference = "#{provider}/#{model_id}"
         unless effective_reference == requested_reference
           raise InvalidModelReferenceError,
                 "Pi did not apply model #{requested_reference.inspect}; effective model is #{effective_reference || "unknown"}."

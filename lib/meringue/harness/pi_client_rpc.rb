@@ -277,12 +277,14 @@ module Meringue
         thinking_change = branch.reverse.find { |record| record["type"] == "thinking_level_change" }
         thinking_level = thinking_change&.fetch("thinkingLevel", nil)&.to_s
 
-        session_settings(
+        settings = session_settings(
           model: normalized_model,
           thinking_level: thinking_level,
           source: "persisted_session",
           note: normalized_model || thinking_level ? nil : "Pi session metadata does not contain model or thinking settings."
         )
+        settings["model_source"] = model_change ? "model_change" : "assistant_message" if normalized_model
+        settings
       end
 
       def normalize_pi_model(model)
@@ -295,7 +297,7 @@ module Meringue
         {
           "provider" => provider,
           "id" => model_id,
-          "reference" => "#{provider}/#{model_id}",
+          "reference" => ModelReference.format(provider: provider, id: model_id),
           "name" => present?(model["name"]) ? model["name"].to_s : nil
         }.compact
       end
@@ -638,6 +640,7 @@ module Meringue
         session_name = metadata_value(session_ref, "session_name")
         argv += ["--name", session_name.to_s] if present?(session_name)
         session_arguments = without_options(extra_args, "--model", "--thinking")
+        session_arguments += session_setting_arguments(session_ref.fetch("session_settings", {}))
         session_arguments = enforce_read_only_tools(session_arguments) if metadata_value(session_ref, "workspace_mode") == "shared_read_only"
         argv += session_arguments
         argv << handoff_prompt.to_s if present?(handoff_prompt)
@@ -734,11 +737,12 @@ module Meringue
         argv += ["--name", session_name.to_s] if present?(session_name)
         argv += ["--append-system-prompt", system_prompt.to_s] if present?(system_prompt)
         session_arguments = extra_args
-        # Model/thinking defaults are spawn-only. Passing newly configured
-        # defaults while resuming an existing session would silently mutate the
-        # very session that global commands promise to leave unchanged.
-        session_arguments = without_options(session_arguments, "--model", "--thinking") if present?(session)
-        unless present?(session) || session_settings.empty?
+        if present?(session)
+          # Config defaults are spawn-only. A resumed session receives its own
+          # persisted effective settings, never defaults that changed later.
+          session_arguments = without_options(session_arguments, "--model", "--thinking")
+          session_arguments += session_setting_arguments(session_settings)
+        elsif !session_settings.empty?
           model = session_settings["model"] || session_settings[:model]
           thinking = session_settings["thinking_level"] || session_settings[:thinking_level]
           if present?(model)
@@ -752,6 +756,55 @@ module Meringue
         end
         session_arguments = enforce_read_only_tools(session_arguments) if workspace_mode.to_s == "shared_read_only"
         argv + session_arguments
+      end
+
+      def session_setting_arguments(settings)
+        return [] unless settings.is_a?(Hash)
+
+        arguments = []
+        model = model_reference_from_settings(settings)
+        thinking = settings["thinking_level"] || settings[:thinking_level]
+        arguments += ["--model", model] if ModelReference.valid?(model)
+        arguments += ["--thinking", thinking.to_s] if present?(thinking)
+        arguments
+      end
+
+      # Pi assistant messages can report a transport model name rather than the
+      # catalog id. Prefer the explicit model_change record parsed from the
+      # session file, then fill missing values from Meringue's live record.
+      def persisted_session_settings(session_ref)
+        recorded = session_ref["session_settings"] || session_ref[:session_settings] || {}
+        recorded = {} unless recorded.is_a?(Hash)
+        persisted = safe_session_file_summary(session_ref).fetch("session_settings", {})
+        persisted = {} unless persisted.is_a?(Hash)
+
+        persisted_model = persisted["model"] || persisted[:model]
+        recorded_model = recorded["model"] || recorded[:model]
+        model = if persisted.fetch("model_source", nil) == "model_change"
+                  persisted_model
+                else
+                  recorded_model || persisted_model
+                end
+        thinking = persisted["thinking_level"] || persisted[:thinking_level] ||
+                   recorded["thinking_level"] || recorded[:thinking_level]
+        { "model" => model, "thinking_level" => thinking }.compact
+      end
+
+      def model_reference_from_settings(settings)
+        return nil unless settings.is_a?(Hash)
+
+        model = settings["model"] || settings[:model]
+        return model.to_s if model.is_a?(String)
+        return nil unless model.is_a?(Hash)
+
+        reference = model["reference"] || model[:reference]
+        return reference.to_s if present?(reference)
+
+        provider = model["provider"] || model[:provider]
+        id = model["id"] || model[:id] || model["modelId"] || model[:modelId]
+        return nil unless present?(provider) && present?(id)
+
+        ModelReference.format(provider: provider, id: id)
       end
 
       def enforce_read_only_tools(arguments)

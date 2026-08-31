@@ -14,6 +14,7 @@ class HarnessModelReferenceTest < HarnessIntegrationTest
   Reference = Meringue::Harness::ModelReference
 
   MULTI_SEGMENT = "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast"
+  GLM_5P3 = "fireworks/fireworks:accounts/fireworks/models/glm-5p3"
 
   def test_a_model_id_may_contain_slashes_and_colons
     parsed = Reference.parse(MULTI_SEGMENT)
@@ -22,6 +23,14 @@ class HarnessModelReferenceTest < HarnessIntegrationTest
     assert_equal "fireworks:accounts/fireworks/routers/glm-5p2-fast", parsed.fetch("id")
     assert_equal MULTI_SEGMENT, parsed.fetch("reference")
     assert_nil Reference.rejection_reason(MULTI_SEGMENT)
+  end
+
+  def test_format_round_trips_ordinary_and_colon_slash_ids
+    ["openai/gpt-5.6-sol", GLM_5P3].each do |reference|
+      provider, id = Reference.split(reference)
+
+      assert_equal reference, Reference.format(provider: provider, id: id)
+    end
   end
 
   def test_ordinary_references_still_parse_and_surrounding_space_is_trimmed

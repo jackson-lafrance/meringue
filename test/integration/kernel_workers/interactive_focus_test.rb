@@ -33,9 +33,15 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
       end
       ref = session_ref.merge("pid" => nil, "is_streaming" => false)
       ref = ref.merge(@replacement_session) if @replacement_session
+      interactive_argv = ["pi", "--session", ref.fetch("session_file")]
+      model = ref.dig("session_settings", "model", "reference")
+      thinking = ref.dig("session_settings", "thinking_level")
+      interactive_argv += ["--model", model] if model
+      interactive_argv += ["--thinking", thinking] if thinking
+      interactive_argv << "continue the interrupted assignment"
       {
         "session_ref" => ref,
-        "interactive_argv" => ["pi", "--session", ref.fetch("session_file"), "continue the interrupted assignment"],
+        "interactive_argv" => interactive_argv,
         "handoff" => {
           "mode" => "native_interactive",
           "transfer" => was_streaming ? "coordinated_turn_abort" : "settled_session",
@@ -159,6 +165,64 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
     end
     recovered = engine.begin_agent_interactive_focus(worker_id)
     assert_equal "accepted", recovered.fetch("status")
+  end
+
+  def test_focus_handoff_keeps_the_workers_complex_model_reference
+    reference = "fireworks/fireworks:accounts/fireworks/models/glm-5p3"
+    client = InteractiveHarnessClient.new
+    engine = build_engine(harness_client: client)
+    context = project_with_issue(engine)
+    worker_id = spawn_worker(
+      engine,
+      context.fetch("issue_id"),
+      model: reference,
+      thinking_level: "high"
+    ).fetch("target_id")
+
+    prepared = engine.begin_agent_interactive_focus(worker_id)
+
+    assert_equal "accepted", prepared.fetch("status"), prepared.inspect
+    assert_equal reference, client.prepared.first.dig("session_settings", "model", "reference")
+    assert_equal reference, client.prepared.first.dig("metadata", "interactive_handoff", "context", "session_settings", "model", "reference")
+    assert_includes prepared.dig("result", "interactive_argv").each_cons(2).to_a, ["--model", reference]
+    assert_includes prepared.dig("result", "interactive_argv").each_cons(2).to_a, ["--thinking", "high"]
+
+    engine.mark_agent_interactive_focus_started(worker_id, pid: 52_424)
+    resumed = engine.end_agent_interactive_focus(worker_id)
+
+    assert_equal "accepted", resumed.fetch("status")
+    assert_equal reference, client.resumed.last.dig("session_settings", "model", "reference")
+    assert_equal reference, agent(engine, worker_id).dig("session_settings", "model", "reference")
+  end
+
+  def test_focus_exit_logs_a_visible_model_substitution_warning
+    requested = "fireworks/fireworks:accounts/fireworks/models/glm-5p3"
+    effective = "fireworks-300k/fireworks:accounts/fireworks/routers/glm-5p2-fast"
+    client = InteractiveHarnessClient.new
+    client.replacement_session = {
+      "session_settings" => { "model" => Meringue::Harness::ModelReference.parse(effective) },
+      "metadata" => {
+        "session_model_substitution" => {
+          "requested" => requested,
+          "effective" => effective,
+          "warning" => "Pi substituted model #{effective} for requested model #{requested}."
+        }
+      }
+    }
+    engine = build_engine(harness_client: client)
+    context = project_with_issue(engine)
+    worker_id = spawn_worker(engine, context.fetch("issue_id"), model: requested).fetch("target_id")
+
+    engine.begin_agent_interactive_focus(worker_id)
+    engine.mark_agent_interactive_focus_started(worker_id, pid: 52_424)
+    resumed = engine.end_agent_interactive_focus(worker_id)
+
+    warning = state(engine).fetch("logs").last
+    assert_equal [warning.fetch("id")], resumed.fetch("log_entry_ids")
+    assert_equal "warning", warning.fetch("level")
+    assert_equal requested, warning.dig("details", "requested_model")
+    assert_equal effective, warning.dig("details", "effective_model")
+    assert_equal "Pi substituted model #{effective} for requested model #{requested}.", warning.fetch("message")
   end
 
   def test_successful_focus_entry_and_exit_do_not_append_user_visible_handoff_logs

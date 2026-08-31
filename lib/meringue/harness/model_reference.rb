@@ -97,6 +97,12 @@ module Meringue
         split(value).first
       end
 
+      # Rebuild a reference without interpreting any characters inside the id.
+      # In particular, `:` and later `/` characters are data, not separators.
+      def format(provider:, id:)
+        "#{provider}/#{id}"
+      end
+
       # The value to hand a harness whose own `--model` flag takes a bare model id rather than a
       # `provider/model` reference. Meringue stores the qualified reference because it has to
       # disambiguate across providers that all expose the same model; a single-vendor harness has

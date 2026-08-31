@@ -364,6 +364,7 @@ module Meringue
         clear_settle_failure!(agent)
         agent["status"] = "working"
         log_ids = append_harness_event_logs(state, agent, poll_result.fetch("events", []))
+        log_ids.concat(append_session_model_substitution_log(state, agent))
         log_ids.concat(record_worker_progress!(state, agent, poll_result.fetch("progress", []), now))
         log_ids.concat(append_recovery_success_log(state, agent, poll_result))
         # The activity clock is what tells the dashboard whether a `working` agent is producing
