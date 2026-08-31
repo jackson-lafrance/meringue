@@ -47,6 +47,11 @@ module TUISupport
       @output.write(frame)
     end
 
+    def write_frame_rows(frame, row:)
+      @frames << { row: row, frame: frame }
+      @output.write(frame)
+    end
+
     def invalidate_frame!
       @frames << :invalidated
     end

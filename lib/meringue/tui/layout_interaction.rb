@@ -383,6 +383,48 @@ module Meringue
         bounded >= 3 ? bounded : 0
       end
 
+      # Geometry equality is the safety gate for row-only input updates. Popup,
+      # context-menu, resize, and multiline-height changes all need a full frame.
+      def input_surface_geometry(state, width, height)
+        return nil if settings_active?(state) || context_menu_snapshot(state)
+
+        width = bounded_width(width)
+        height = bounded_height(height)
+        if fullscreen_agent_workspace?(state)
+          workspace = state.fetch("_agent_workspace", {}) || {}
+          return nil if workspace.fetch("interactive", false) || workspace.fetch("view", "agent") != "agent"
+          return nil if agent_workspace_pane.slash_suggestions?(state)
+
+          pane_width = width - (OUTER_MARGIN * 2)
+          content_width = pane_width - 4
+          line_count = agent_workspace_pane.composer_lines(state, width: content_width).length
+          composer_height = composer_height_for(height - BOTTOM_HINT_HEIGHT, line_count)
+          return {
+            surface: :workspace,
+            screen_width: width,
+            x: OUTER_MARGIN,
+            y: height - BOTTOM_HINT_HEIGHT - composer_height,
+            width: pane_width,
+            height: composer_height,
+            content_width: content_width
+          }
+        end
+
+        return nil if chat_pane.popup?(state)
+
+        metrics = layout_metrics(width, height, state)
+        {
+          surface: :dashboard,
+          screen_width: width,
+          x: metrics.fetch(:composer_x),
+          y: metrics.fetch(:composer_y),
+          width: metrics.fetch(:composer_width),
+          height: metrics.fetch(:composer_height),
+          content_width: metrics.fetch(:composer_content_width),
+          metrics: metrics
+        }
+      end
+
       def layout_metrics(width, height, state)
         top_y = 0
         sidebar_x = OUTER_MARGIN
