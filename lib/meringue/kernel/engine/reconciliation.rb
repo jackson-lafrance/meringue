@@ -27,11 +27,7 @@ module Meringue
         pending_prompt_results = reconcile_step("deliver_pending_prompts", []) { deliver_pending_agent_prompts }
         recovered_results = reconcile_step("recover_head_results", []) { recover_unapplied_head_results }
         prune_result = reconcile_step("prune_killed_records", { "changed" => false, "log_entry_ids" => [] }) { prune_killed_records }
-        delivery_pr_refreshes = if github_support_enabled?
-                                  reconcile_step("refresh_delivery_pull_requests", []) { refresh_stale_delivery_pull_requests }
-                                else
-                                  []
-                                end
+        delivery_pr_refreshes = reconcile_step("refresh_delivery_pull_requests", []) { refresh_stale_delivery_pull_requests }
         model_catalog_refresh = reconcile_step("refresh_model_catalog", { "changed" => false }) { refresh_active_model_catalog }
         agents = synchronized_state do
           normalized_state.fetch("agents").select { |agent| reconcile_candidate?(agent) }.map { |agent| deep_copy(agent) }

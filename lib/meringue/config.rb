@@ -109,31 +109,28 @@ module Meringue
       ).fetch("config")
     end
 
-    # Runs before State::Store can create a new empty state file. An explicit
-    # experiment value always wins. Existing installations retain GitHub support;
-    # genuinely new installations record the opt-in default (off).
+    # Runs before State::Store can create a new empty state file.
     #
-    # Schema 2 is the version in which the split-defaults and worker-guidance booleans
-    # became the three modes of experiments.agent_defaults_mode, so the resolved mode is
-    # what this writes down. Bumping the version without recording it left every
-    # unmigrated installation resolving retired booleans on every read, forever.
+    # Schema 2 made the split-defaults and worker-guidance booleans the three
+    # modes of experiments.agent_defaults_mode, so the resolved mode is what
+    # that step writes down.
+    #
+    # Schema 3 removed experiments.github_support: GitHub support is default
+    # behavior and the frontend selection under `[forge]` decides whether the
+    # built-in GitHub frontend or an alternate one is used. A persisted
+    # experiments.github_support value is deleted rather than translated — an
+    # installation that had saved `true` keeps GitHub support because it is now
+    # the default, and there is no experiment checkbox to restore.
     def self.migrate_settings!(path: DEFAULT_PATH, state_path: nil)
+      _ = state_path
       expanded_path = File.expand_path(path.to_s)
       config = load(path: expanded_path)
       return config if config.value("settings", "schema_version").to_i >= Schema::VERSION
 
-      # "Existing installation" means one that already has state: it was tracking pull
-      # requests before GitHub support became an opt-in, and turning that off underneath
-      # it would silently drop the PR markers, pickers, and delivery actions it was using.
-      # A genuinely new installation gets the opt-in default instead. Reading only the
-      # explicit value here — and never the state file the caller went to the trouble of
-      # naming — turned every upgrade into an opt-out.
-      explicit_github = config.value("experiments", "github_support")
-      github_support = explicit_github.nil? ? existing_installation?(state_path) : explicit_github == true
       patches = {
         "settings.schema_version" => Schema::VERSION,
-        "experiments.github_support" => github_support,
-        "experiments.agent_defaults_mode" => Meringue::Experiments::AgentDefaultsMode.resolve(config)
+        "experiments.agent_defaults_mode" => Meringue::Experiments::AgentDefaultsMode.resolve(config),
+        "experiments.github_support" => nil
       }
       store = Store.new(path: expanded_path)
       store.patch_paths(base_fingerprint: store.fingerprint, patches: patches)

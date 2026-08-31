@@ -15,8 +15,9 @@ Categories:
 3. **Experiments** — registry-backed opt-in product capabilities.
 4. **Harnesses** — provider commands, environment, arguments, Pi session directory, head names/timeouts, and Claude schema mode.
 5. **Workspace** — managed root, provisioning limits, Git timeouts, shell/editor launchers, and terminal buffer.
-6. **Safety** — worker command blacklist and predecessor-failure policy.
-7. **Keybindings** — every action registered by `TUI::Keybindings`, including intentional unbinding with an empty list. These rows are shown directly; they are not Advanced settings.
+6. **Alternate backend** — the two pluggable axes: the git backend that provisions isolated mutable workspaces, and the code-hosting frontend that answers pull-request questions. Both default to the built-in GitHub-backed pair; both `command` selections are documented extension points.
+7. **Safety** — worker command blacklist and predecessor-failure policy.
+8. **Keybindings** — every action registered by `TUI::Keybindings`, including intentional unbinding with an empty list. These rows are shown directly; they are not Advanced settings.
 
 Advanced provider, workspace, and keybinding rows start collapsed **inside the category that owns them**. Each category shows its exact hidden count in the category rail and in a **Show advanced settings (N)** row; selecting it or pressing `a` reveals only that category's rows. The row keeps its place once open, reading **Hide advanced settings (N)** above the rows it revealed, so the control that opened them is the one that puts them away; the footer names the `A` key wherever the category has advanced rows and the line has room. Other categories keep their own advanced rows collapsed, so the reveal count never describes settings somewhere else. Every supported editable path is still reachable; internal compatibility keys are represented by their role-aware rows instead of duplicated.
 
@@ -86,10 +87,11 @@ The current experiment definitions are:
 
 ```toml
 [experiments]
-github_support = false
 agent_defaults_mode = "role-specific"   # shared | role-specific | guided
 # worker_spawning_guidance_prompt is shown only in guided mode
 ```
+
+GitHub support is not an experiment: it is default behavior, selected through the frontend axis of the Alternate backend category. See [GitHub support and the frontend axis](#github-support-and-the-frontend-axis) below.
 
 `agent_defaults_mode` selects one of three arrangements for future model and reasoning defaults, and defaults to `role-specific`:
 
@@ -105,21 +107,23 @@ Role *harnesses* are independent of this mode: `/harness head …` and `/harness
 
 Goal loops, harness selection, focused workspaces, read-only workers, command blacklists, presentation preferences, and terminal launchers already have explicit activation or are core safety/preferences.
 
-### GitHub support
+### GitHub support and the frontend axis
 
-When enabled, Meringue may use bounded read-only `gh` lookups for exact issue/PR titles, delivery verification, branch discovery, and PR status refresh. Request/worker PR links can be associated, PR state participates in prune/reuse safety, and PR markers, pickers, hints, and browser actions are available.
+GitHub support is on by default. When the built-in GitHub frontend is selected (`[forge] frontend = "github"`, the default), Meringue may use bounded read-only `gh` lookups for exact issue/PR titles, delivery verification, branch discovery, and PR status refresh. Request/worker PR links can be associated, PR state participates in prune/reuse safety, and PR markers, pickers, hints, and browser actions are available.
 
-When GitHub support is selected, the Experiments category also provides **Test GitHub access**; the action is completely absent while that experiment is off. This non-persistent action resolves the current checkout's `origin` remote and checks the minimum supported workflow access: `gh auth status --hostname github.com`, followed by `gh repo view OWNER/REPO --json nameWithOwner`. Both commands are non-interactive, share a short timeout, and are read-only; no GitHub resource can be created, edited, closed, commented on, or merged. `/github test` runs the same kernel command. The UI identifies successful access, an unavailable CLI/service, missing authentication, denied repository access, a timeout, or a malformed/non-GitHub remote, and retrying the action does not change GitHub.
+While the GitHub frontend is selected, the Alternate backend category also provides **Test GitHub access**; the action is completely absent while an alternate frontend is selected. This non-persistent action resolves the current checkout's `origin` remote and checks the minimum supported workflow access: `gh auth status --hostname github.com`, followed by `gh repo view OWNER/REPO --json nameWithOwner`. Both commands are non-interactive, share a short timeout, and are read-only; no GitHub resource can be created, edited, closed, commented on, or merged. `/github test` runs the same kernel command. The UI identifies successful access, an unavailable CLI/service, missing authentication, denied repository access, a timeout, or a malformed/non-GitHub remote, and retrying the action does not change GitHub.
 
-When disabled:
+While an alternate frontend is selected (`[forge] frontend = "command"`):
 
 - built-in head context contains no `gh` discovery commands or exact-GitHub-title rules;
 - worker completion does not extract or verify PR URLs;
 - reconciliation does not discover branches or refresh PR status;
-- `/prs`, `Ctrl-B`, workspace PR actions, markers, and hints are hidden/gated with `Enable GitHub support in Settings → Experiments`;
+- `/prs`, `Ctrl-B`, workspace PR actions, markers, and hints are hidden/gated with a message pointing at Settings → Alternate backend;
 - historical PR records remain stored;
 - a previously verified `merged` fact still prevents unsafe branch reuse and permits prune;
-- historical open/unknown records conservatively retain terminal work during prune, without external I/O, and the result explains how to re-enable refresh.
+- historical open/unknown records conservatively retain terminal work during prune, without external I/O, and the result explains how to restore the GitHub frontend.
+
+A `command` frontend is an extension point, not a shipped implementation: it fails closed (no lookups, no GitHub UI) until an adapter exists. Embedding applications may instead inject their own frontend object implementing the documented forge client contract; see [`forge-frontends.md`](forge-frontends.md).
 
 This is an integration gate, not a shell sandbox: user-directed worker commands and generic `after_command` gates are unchanged.
 
@@ -127,15 +131,14 @@ This is an integration gate, not a shell sandbox: user-directed worker commands 
 
 The config carries `[settings].schema_version`. Migration runs before `State::Store` can create a new empty state file.
 
-- Explicit experiment values always win.
-- A pre-upgrade state file or onboarding marker migrates GitHub support to `true`.
-- A genuinely new installation records GitHub support as `false`.
+- Schema 3 deletes a persisted `experiments.github_support` key: GitHub support became default behavior, so a setup that saved `true` keeps it (it is now the default) and there is no experiment checkbox to restore. Other saved keys are untouched.
 - Historical PR metadata and unknown config are not deleted.
+- The `[forge]` and `[version_control]` selections default to the built-in GitHub-backed pair when absent.
 - Onboarding version 1 remains valid and is not replayed.
 
 ## Setup uses the same overlay
 
-First-run Setup is a curated `Settings::Draft` mode, not a second persistence implementation. It presents a centered, welcoming Welcome → Harness → Theme → Meringue Xtras → Done flow, asks for one harness and applies it to both roles, offers a short Preferred editor list (`vim`, `nvim`, `emacs`, `cursor`, `code`, or **Custom**), asks for no model or reasoning at all, and will not advance past the Harness step until one is chosen with one dynamic step indicator, contextual Enter/picker controls, and a restrained optional welcome animation. The dashboard status bar always uses its built-in layout; it is not a Setup/Settings customization surface. Every page has one centered Next/Complete action, while Backspace/Delete/Shift-Tab retain backwards navigation. Meringue Xtras ends the flow with Complete. Setup reuses the schema, editors, validation, theme/status previews, hit testing, and persistence result handling without inheriting the dense advanced-settings presentation.
+First-run Setup is a curated `Settings::Draft` mode, not a second persistence implementation. It presents a centered, welcoming Welcome → Harness → Theme → Alternate backend → Meringue Xtras → Done flow, asks for one harness and applies it to both roles, offers a short Preferred editor list (`vim`, `nvim`, `emacs`, `cursor`, `code`, or **Custom**), confirms the default git backend and GitHub frontend (alternates plug in through the same step), asks for no model or reasoning at all, and will not advance past the Harness step until one is chosen with one dynamic step indicator, contextual Enter/picker controls, and a restrained optional welcome animation. The dashboard status bar always uses its built-in layout; it is not a Setup/Settings customization surface. Every page has one centered Next/Complete action, while Backspace/Delete/Shift-Tab retain backwards navigation. Meringue Xtras ends the flow with Complete. Setup reuses the schema, editors, validation, theme/status previews, hit testing, and persistence result handling without inheriting the dense advanced-settings presentation.
 
 Complete sends the changed settings, explicit absent experiment defaults, and the completed onboarding outcome through one `SaveConfiguration` transaction. Automatic first-run skip saves only the skipped marker and explicit experiment defaults; manual `/setup` cancel writes nothing and preserves the existing marker. `/setup complete|skip` remain compatibility commands, and onboarding version 1 remains valid for existing users.
 

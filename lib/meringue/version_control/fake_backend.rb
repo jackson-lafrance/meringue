@@ -7,12 +7,12 @@ module Meringue
     #
     # Registration asks a backend to prove that a project can host isolated mutable
     # workspaces, and the built-in backend proves it by finding a Git repository with a
-    # GitHub origin and a usable base ref. That is the right bar for a real project and
-    # the wrong one for a test about issues, workers, heads, or goals: those fixtures are
-    # directories, and making each of them a repository would buy nothing but git
-    # subprocesses. This answers the capability probe from a fixture's own configuration
-    # instead, and leaves everything that actually touches a worktree to the real
-    # workspace manager, so the code under test is unchanged.
+    # usable base ref (a forge remote is optional). That is the right bar for a real
+    # project and the wrong one for a test about issues, workers, heads, or goals: those
+    # fixtures are directories, and making each of them a repository would buy nothing
+    # but git subprocesses. This answers the capability probe from a fixture's own
+    # configuration instead, and leaves everything that actually touches a worktree to
+    # the real workspace manager, so the code under test is unchanged.
     #
     # Tests that are about the probe itself use the real backend against a real
     # repository; see `test/integration/workspace/`.
@@ -45,7 +45,7 @@ module Meringue
             "shared_read_only_workspace" => true,
             "delivery" => @isolated
           },
-          "diagnostics" => @diagnostics || (@isolated ? [] : ["github_origin_missing"]),
+          "diagnostics" => @diagnostics || (@isolated ? [] : ["not_a_git_repository"]),
           "diagnostic_at" => Time.now.utc.iso8601
         }
       end

@@ -318,9 +318,8 @@ module KernelWorkersSupport
     run_git(root, "config", "user.name", "Meringue Tests")
     run_git(root, "add", ".")
     run_git(root, "commit", "-m", "initial commit")
-    # Registration accepts a project only once the backend can prove isolated mutable
-    # workspaces, and the built-in backend proves it from a GitHub origin. The URL is
-    # never contacted: it is read, not fetched.
+    # Registration accepts any git repository with a usable base ref; the URL is
+    # never contacted, only read, and a forge remote is optional for provisioning.
     run_git(root, "remote", "add", "origin", "git@github.com:example/#{name}.git")
     root
   end
@@ -329,6 +328,22 @@ module KernelWorkersSupport
     root = tmp_path(name)
     FileUtils.mkdir_p(root)
     File.write(File.join(root, "notes.txt"), "no git here\n")
+    root
+  end
+
+  # A git repository whose origin fetches from a private forge (gitstream) with no
+  # GitHub origin, mirroring shop/world. Registration and isolated provisioning
+  # must work without a GitHub origin.
+  def create_gitstream_repo(name = "gitstream-project")
+    root = tmp_path(name)
+    FileUtils.mkdir_p(root)
+    File.write(File.join(root, "README.md"), "# #{name}\n")
+    run_git(root, "init", "--initial-branch=main")
+    run_git(root, "config", "user.email", "meringue-tests@example.com")
+    run_git(root, "config", "user.name", "Meringue Tests")
+    run_git(root, "add", ".")
+    run_git(root, "commit", "-m", "initial commit")
+    run_git(root, "remote", "add", "origin", "git@gitstream.shopify.io:shop/#{name}.git")
     root
   end
 

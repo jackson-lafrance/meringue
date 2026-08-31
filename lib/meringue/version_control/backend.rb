@@ -38,8 +38,9 @@ module Meringue
       end
     end
 
-    # First-party Git + GitHub backend. GitHub identity is required for the
-    # built-in delivery workflow, while workspace ownership remains Git-based.
+    # First-party Git backend. Workspace ownership is Git-based; a forge remote of
+    # any kind is optional and only enables pull-request delivery, not workspace
+    # provisioning.
     class GitHubGitBackend < Backend
       attr_reader :manager
 

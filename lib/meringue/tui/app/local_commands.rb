@@ -260,11 +260,6 @@ module Meringue
       end
 
       def handle_local_pull_requests_command(state)
-        unless github_support_enabled?(state)
-          append_jump_response(github_support_disabled_message)
-          return true
-        end
-
         open_delivery_pr_picker(state)
         true
       end

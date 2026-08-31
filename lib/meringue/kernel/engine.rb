@@ -54,7 +54,7 @@ module Meringue
                      async_heads: false,
                      async_worker_provisioning: false,
                      worker_provisioning_concurrency: nil,
-                     forge_client: Forge::GitHubClient.new,
+                     forge_client: nil,
                      metric_probe: Goals::MetricProbe.new,
                      config_path: Config::DEFAULT_PATH,
                      config: nil,
@@ -87,7 +87,11 @@ module Meringue
         end
         @cwd = File.expand_path(cwd)
         @async_heads = async_heads
-        @forge_client = forge_client
+        # The forge client is the code-hosting frontend. An injected client wins
+        # (embedding applications supply their own frontend object); otherwise
+        # the `[forge]` selection decides, and a configured alternate frontend
+        # fails closed rather than silently using GitHub.
+        @forge_client = forge_client || Forge.client_for(@config)
         @metric_probe = metric_probe
         @deferred_worker_default_failure_policy = @config.conflict_predecessor_failure
         # The dashboard enables this explicitly. Small synchronous embedders retain their existing

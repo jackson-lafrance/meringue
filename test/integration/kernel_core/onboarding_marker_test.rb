@@ -71,8 +71,7 @@ class KernelCoreOnboardingMarkerTest < Minitest::Test
         "agent.head_harness" => "claude",
         "agent.worker_harness" => "pi",
         "agent.head_model" => "openai/gpt-5.6-sol",
-        "agent.worker_model" => "anthropic/claude-opus-5",
-        "experiments.github_support" => true
+        "agent.worker_model" => "anthropic/claude-opus-5"
       },
       "onboarding_outcome" => "completed"
     )
@@ -84,7 +83,6 @@ class KernelCoreOnboardingMarkerTest < Minitest::Test
     assert_equal "pi", config.setting("agent.worker_harness", env: {})
     assert_equal "openai/gpt-5.6-sol", config.setting("agent.head_model", env: {})
     assert_equal "anthropic/claude-opus-5", config.setting("agent.worker_model", env: {})
-    assert_equal true, config.value("experiments", "github_support")
     assert_equal "completed", result.dig("result", "onboarding_outcome")
 
     metadata = persisted_state.fetch("metadata")
@@ -99,13 +97,13 @@ class KernelCoreOnboardingMarkerTest < Minitest::Test
     result = apply_command(
       "SaveConfiguration",
       "base_fingerprint" => baseline,
-      "changes" => { "experiments.github_support" => false },
+      "changes" => { "appearance.theme" => "gruvbox" },
       "onboarding_outcome" => "skipped"
     )
 
     assert_accepted(result)
     assert_equal "skipped", saved_config.onboarding_outcome
-    assert_equal false, saved_config.value("experiments", "github_support")
+    assert_equal "gruvbox", saved_config.setting("appearance.theme", env: {})
     assert_equal Meringue::Harness::Registry::DEFAULT_MODEL, saved_config.setting("agent.head_model", env: {})
     assert_equal Meringue::Harness::Registry::DEFAULT_MODEL, saved_config.setting("agent.worker_model", env: {})
   end
@@ -115,7 +113,7 @@ class KernelCoreOnboardingMarkerTest < Minitest::Test
     result = apply_command(
       "SaveConfiguration",
       "base_fingerprint" => baseline,
-      "changes" => { "experiments.github_support" => false },
+      "changes" => { "appearance.theme" => "gruvbox" },
       "onboarding_outcome" => "maybe"
     )
 

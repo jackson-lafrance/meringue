@@ -19,6 +19,19 @@ module Meringue
         @command_timeout = Float(command_timeout)
       end
 
+      def id
+        "github"
+      end
+
+      # The repository handle this frontend uses for lookups: `owner/repo` for
+      # a GitHub origin remote, nil for anything else. Other frontends resolve
+      # the same remote differently (a command frontend hands the raw URL to
+      # its adapter), which is why this lives on the client rather than on the
+      # caller.
+      def repository_from_remote(remote)
+        self.class.repository_from_remote(remote)
+      end
+
       # Return the owner/repository portion of a supported GitHub origin without
       # contacting GitHub. Keeping this parser in the forge client gives the
       # kernel and access checks the same remote conventions.

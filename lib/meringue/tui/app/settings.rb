@@ -123,32 +123,34 @@ module Meringue
       end
 
       def settings_row_visible?(row)
-        return true unless row.fetch("id", nil) == "experiments.github_support_test_access"
+        return true unless row.fetch("id", nil) == "forge.test_github_access"
 
-        @settings_draft.value("experiments.github_support") == true
+        # The access check is a property of the built-in GitHub frontend; with an
+        # alternate frontend selected it is not this repository's check to run.
+        @settings_draft.value("forge.frontend") != "command"
       rescue KeyError
         false
       end
 
       def decorate_github_access_action_row(row)
-        return row unless row.fetch("id", nil) == "experiments.github_support_test_access"
+        return row unless row.fetch("id", nil) == "forge.test_github_access"
 
-        enabled = @settings_draft.value("experiments.github_support") == true
+        enabled = @settings_draft.value("forge.frontend") != "command"
         result = @github_access_test_result
         display_value = if !enabled
-                          "Enable support"
-                        elsif result
-                          github_access_test_label(result.fetch("outcome", result.fetch("status", "unavailable")))
-                        else
-                          "Run test"
-                        end
+                          "Switch frontend"
+                          elsif result
+                            github_access_test_label(result.fetch("outcome", result.fetch("status", "unavailable")))
+                          else
+                            "Run test"
+                          end
         description = if !enabled
-                        "Enable GitHub support above before running this read-only check."
-                      elsif result
-                        result.fetch("message", row.fetch("description", "")).to_s
-                      else
-                        row.fetch("description", "")
-                      end
+                        "The GitHub access check applies to the built-in GitHub frontend."
+                        elsif result
+                          result.fetch("message", row.fetch("description", "")).to_s
+                        else
+                          row.fetch("description", "")
+                        end
         row.merge(
           "display_value" => display_value,
           "description" => description,
@@ -818,7 +820,7 @@ module Meringue
           move_settings_category(1)
           return true
         end
-        if id == "experiments.github_support_test_access"
+        if id == "forge.test_github_access"
           return test_github_access_from_settings(state, on_submit)
         end
         if id == "setup.check_harness"
@@ -850,10 +852,10 @@ module Meringue
       end
 
       def test_github_access_from_settings(state, on_submit)
-        unless @settings_draft.value("experiments.github_support") == true
+        unless @settings_draft.value("forge.frontend") != "command"
           @github_access_test_result = {
             "outcome" => "unavailable",
-            "message" => "Enable GitHub support in Settings → Experiments before testing access."
+            "message" => "The GitHub access check applies to the built-in GitHub frontend."
           }
           return false
         end
@@ -862,9 +864,9 @@ module Meringue
           "outcome" => "testing",
           "message" => "Testing GitHub authentication and read access…"
         }
-        # Setup may test an opt-in before its draft is persisted. The marker is
-        # interpreted by the kernel only for this explicit command and does not
-        # mutate the saved configuration.
+        # Setup may run the check while the persisted config still names an
+        # alternate frontend. The marker is interpreted by the kernel only for
+        # this explicit command and does not mutate the saved configuration.
         command = setup_mode? ? "/github test --draft-support" : "/github test"
         submit_prompt(command, on_submit, state)
         true
@@ -1150,17 +1152,19 @@ module Meringue
         @settings_row_index = settings_rows.index { |row| row.fetch("id", nil) == definition.id } || 0
       end
 
-      def github_support_enabled?(state = nil)
-        explicit = config.value("experiments", "github_support")
-        return explicit if explicit == true || explicit == false
-        return true if config.value("settings", "schema_version").to_i < Config::Schema::VERSION
-        return false unless state.is_a?(Hash)
-
-        Array(state.fetch("issues", [])).any? { |issue| State::Models.pull_request_records_from(issue).any? }
+      # Pull-request/forge support is always active: a frontend is always configured
+      # (the default is the built-in GitHub frontend), so the PR pickers, markers,
+      # and opening actions are always available. Per-project degradation — a
+      # project with no forge remote tracks no PRs — is inherent and needs no
+      # global gate.
+      def forge_support_active?(state = nil)
+        _ = state
+        true
       end
 
-      def github_support_disabled_message
-        "Enable GitHub support in Settings → Experiments to use pull request commands."
+      # Compatibility alias for call sites that have not been renamed yet.
+      def github_support_enabled?(state = nil)
+        forge_support_active?(state)
       end
 
       # --- first-run setup --------------------------------------------------

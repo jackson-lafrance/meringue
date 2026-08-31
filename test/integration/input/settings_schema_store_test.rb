@@ -237,8 +237,7 @@ class InputSettingsSchemaStoreTest < Minitest::Test
         base_fingerprint: store.fingerprint,
         changes: {
           "agent.head_model" => "openai/gpt-5.6-sol",
-          "agent.worker_model" => "anthropic/claude-opus-5",
-          "experiments.github_support" => true
+          "agent.worker_model" => "anthropic/claude-opus-5"
         },
         onboarding_outcome: "completed",
         completed_at: "2026-08-16T12:00:00Z"
@@ -250,7 +249,6 @@ class InputSettingsSchemaStoreTest < Minitest::Test
       assert_equal "2026-08-16T12:00:00Z", config.value("onboarding", "completed_at")
       assert_equal "openai/gpt-5.6-sol", config.setting("agent.head_model", env: {})
       assert_equal "anthropic/claude-opus-5", config.setting("agent.worker_model", env: {})
-      assert_equal true, config.value("experiments", "github_support")
     end
   end
 
@@ -324,16 +322,38 @@ class InputSettingsSchemaStoreTest < Minitest::Test
     assert_nil config.to_file_h.dig("harness", "head_provider")
   end
 
-  def test_migration_enables_existing_installations_and_disables_new_ones
+  def test_migration_deletes_the_retired_github_support_experiment_and_bumps_the_schema
     with_paths do |config_path, state_path|
-      new_config = Meringue::Config.migrate_settings!(path: config_path, state_path: state_path)
-      assert_equal false, new_config.value("experiments", "github_support")
+      # A saved setup that persisted experiments.github_support keeps working:
+      # migration deletes the retired key (GitHub support is default behavior now)
+      # and bumps the schema version, while other saved settings are untouched.
+      File.write(config_path, <<~TOML)
+        [settings]
+        schema_version = 1
 
-      old_config_path = File.join(File.dirname(config_path), "old.toml")
+        [experiments]
+        github_support = true
+        self_fixing_workers = true
+
+        [harness]
+        head_provider = "pi"
+        worker_provider = "pi"
+      TOML
       old_state_path = File.join(File.dirname(config_path), "old-state.json")
       File.write(old_state_path, JSON.generate(Meringue::State::Models.empty_state))
-      old_config = Meringue::Config.migrate_settings!(path: old_config_path, state_path: old_state_path)
-      assert_equal true, old_config.value("experiments", "github_support")
+
+      migrated = Meringue::Config.migrate_settings!(path: config_path, state_path: old_state_path)
+      assert_equal Meringue::Config::Schema::VERSION, migrated.value("settings", "schema_version")
+      assert_nil migrated.value("experiments", "github_support")
+      assert_equal true, migrated.value("experiments", "self_fixing_workers")
+      assert_equal "pi", migrated.value("harness", "head_provider")
+
+      # A genuinely new installation also migrates to the current schema and has
+      # no experiments.github_support key; GitHub support is on by default.
+      new_config_path = File.join(File.dirname(config_path), "new.toml")
+      new_config = Meringue::Config.migrate_settings!(path: new_config_path, state_path: state_path)
+      assert_equal Meringue::Config::Schema::VERSION, new_config.value("settings", "schema_version")
+      assert_nil new_config.value("experiments", "github_support")
     end
   end
 

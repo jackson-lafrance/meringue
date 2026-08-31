@@ -172,16 +172,39 @@ class KernelWorkersWorkspaceProvisioningTest < Minitest::Test
   # A worker used to fall back to running in the project root when no worktree could be
   # allocated. It does not any more: a directory that cannot host an isolated workspace is
   # refused at registration, so no worker ever reaches it.
-  def test_a_non_git_project_root_is_refused_at_registration
+  def test_a_non_git_project_root_registers_with_degraded_capabilities
     engine = build_engine
     root = create_plain_directory
 
     result = apply_raw(engine, "AddProject", { "path" => root, "name" => "Plain" })
 
-    assert_equal "rejected", result.fetch("status")
-    assert_includes result.fetch("errors"), "version_control_backend_unavailable"
-    assert_includes result.fetch("errors"), "not_a_git_repository"
-    assert_empty state(engine).fetch("projects")
+    assert_equal "accepted", result.fetch("status")
+    project = result.fetch("result")
+    assert_equal false, project.fetch("version_control_capabilities").fetch("isolated_workspaces")
+    assert_equal "not_a_git_repository", project.fetch("version_control_diagnostics").first
+    assert_equal 1, state(engine).fetch("projects").length
+  end
+
+  def test_a_gitstream_origin_repo_registers_and_provisions_an_isolated_worker
+    engine = build_engine
+    root = create_gitstream_repo
+
+    project_result = apply_raw(engine, "AddProject", { "path" => root, "name" => "World" })
+    assert_equal "accepted", project_result.fetch("status")
+    project = project_result.fetch("result")
+    assert_equal true, project.fetch("version_control_capabilities").fetch("isolated_workspaces"),
+                 "a gitstream-origin repo must provision isolated workspaces without a GitHub origin"
+    refute_includes Array(project.fetch("version_control_diagnostics")), "github_origin_missing"
+
+    issue_result = apply_raw(engine, "CreateIssue", { "project_id" => project.fetch("id"), "title" => "Ship the thing" })
+    assert_equal "accepted", issue_result.fetch("status")
+
+    spawn_result = apply_raw(engine, "SpawnWorker", { "issue_id" => issue_result.fetch("target_id"), "prompt" => "Go." })
+    assert_equal "accepted", spawn_result.fetch("status")
+    worker = agent(engine, "P1-I1-W1")
+    assert_equal "working", worker.fetch("status")
+    assert worker.fetch("workspace_path"), "the gitstream-backed worker must receive an isolated workspace"
+    assert Dir.exist?(worker.fetch("workspace_path"))
   end
 
   def test_harness_spawn_failure_fails_the_command_and_releases_the_workspace

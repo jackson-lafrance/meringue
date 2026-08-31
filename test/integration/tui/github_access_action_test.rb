@@ -13,7 +13,7 @@ class TuiGithubAccessActionTest < Minitest::Test
   def setup
     @tmpdir = Dir.mktmpdir("meringue-github-access-ui")
     @config_path = File.join(@tmpdir, "config.toml")
-    write_config(true)
+    write_config
     @config = Meringue::Config.load(path: @config_path)
     @layout = Meringue::TUI::Layout.new
     @app = Meringue::TUI::App.new(layout: @layout, config: @config)
@@ -31,9 +31,11 @@ class TuiGithubAccessActionTest < Minitest::Test
 
   def test_action_is_present_in_settings_and_setup_and_does_not_persist_itself
     @app.send(:open_settings, @state)
-    2.times { send_key(TAB) }
+    # The Test GitHub access action lives in the Alternate backend category, not
+    # Experiments, now that GitHub support is default behavior.
+    navigate_to_category("Alternate backend")
     rows = @app.send(:settings_rows)
-    action = rows.find { |row| row.fetch("id") == "experiments.github_support_test_access" }
+    action = rows.find { |row| row.fetch("id") == "forge.test_github_access" }
     refute_nil action
     assert_equal "Run test", action.fetch("display_value")
 
@@ -63,58 +65,46 @@ class TuiGithubAccessActionTest < Minitest::Test
     assert_includes @app.render(compose, width: 100, height: 30, color: false), "read access to acme/app"
 
     @app.send(:open_settings, @state, mode: "setup")
-    # Setup will not advance past the harness step until one is chosen.
     %w[agent.head_harness agent.worker_harness].each do |id|
       @app.instance_variable_get(:@settings_draft).set(id, "pi")
     end
-    # Welcome, Harness, Theme, Version control, then Experiments.
+    # Welcome, Harness, Theme, Alternate backend, then Experiments.
     4.times { send_key(TAB) }
     assert_equal "Experiments", @app.send(:settings_category)
-    assert @app.send(:settings_rows).any? { |row| row.fetch("id") == "experiments.github_support_test_access" }
+    assert @app.send(:settings_rows).none? { |row| row.fetch("id") == "forge.test_github_access" }
   end
 
-  def test_setup_access_check_uses_the_draft_opt_in_without_saving_it
-    write_config(false)
+  def test_setup_access_check_runs_from_the_alternate_backend_step
     @app = Meringue::TUI::App.new(layout: @layout, config: Meringue::Config.load(path: @config_path))
     @app.send(:open_settings, @state, mode: "setup")
-    # Setup will not advance past the harness step until one is chosen.
     %w[agent.head_harness agent.worker_harness].each do |id|
       @app.instance_variable_get(:@settings_draft).set(id, "pi")
     end
-    # Welcome, Harness, Theme, Version control, then Experiments.
-    4.times { send_key(TAB) }
-    assert_equal "Experiments", @app.send(:settings_category)
-    @app.instance_variable_get(:@settings_draft).set("experiments.github_support", true)
+    # Welcome, Harness, Theme, Alternate backend.
+    3.times { send_key(TAB) }
+    assert_equal "Alternate backend", @app.send(:settings_category)
     rows = @app.send(:settings_rows)
-    @app.instance_variable_set(:@settings_row_index, rows.index { |row| row.fetch("id") == "experiments.github_support_test_access" })
+    @app.instance_variable_set(:@settings_row_index, rows.index { |row| row.fetch("id") == "forge.test_github_access" })
 
     @app.send(:activate_settings_row, @state, on_submit: @handler)
     command = Meringue::Input::SlashCommandParser.new.parse(@submitted.pop)
 
-    assert_equal true, command.payload.fetch("draft_github_support")
-    assert_equal false, Meringue::Config.load(path: @config_path).value("experiments", "github_support")
+    assert_equal "TestGitHubAccess", command.type
+    assert_nil Meringue::Config.load(path: @config_path).value("experiments", "github_support")
   end
 
-  def test_disabled_action_is_completely_absent_in_settings_and_setup
-    write_config(false)
+  def test_action_is_absent_when_an_alternate_frontend_is_selected
+    File.write(
+      @config_path,
+      "[settings]\nschema_version = 3\n[forge]\nfrontend = \"command\"\n[tui]\ncolorscheme = \"meringue\"\n"
+    )
     @app = Meringue::TUI::App.new(layout: @layout, config: Meringue::Config.load(path: @config_path))
     @app.send(:open_settings, @state)
-    2.times { send_key(TAB) }
+    navigate_to_category("Alternate backend")
 
-    refute @app.send(:settings_rows).any? { |row| row.fetch("id") == "experiments.github_support_test_access" }
+    refute @app.send(:settings_rows).any? { |row| row.fetch("id") == "forge.test_github_access" }
     refute_includes @app.render(compose, width: 100, height: 30, color: false), "Test GitHub access"
     assert_equal 0, @submitted.size
-
-    @app.send(:open_settings, @state, mode: "setup")
-    # Setup will not advance past the harness step until one is chosen.
-    %w[agent.head_harness agent.worker_harness].each do |id|
-      @app.instance_variable_get(:@settings_draft).set(id, "pi")
-    end
-    # Welcome, Harness, Theme, Version control, then Experiments.
-    4.times { send_key(TAB) }
-    assert_equal "Experiments", @app.send(:settings_category)
-    refute @app.send(:settings_rows).any? { |row| row.fetch("id") == "experiments.github_support_test_access" }
-    refute_includes @app.render(compose, width: 100, height: 30, color: false), "Test GitHub access"
   end
 
   def test_all_client_outcomes_have_clear_configuration_labels
@@ -136,11 +126,17 @@ class TuiGithubAccessActionTest < Minitest::Test
 
   private
 
-  def write_config(enabled)
+  def write_config
     File.write(
       @config_path,
-      "[settings]\nschema_version = 1\n[experiments]\ngithub_support = #{enabled}\n[tui]\ncolorscheme = \"meringue\"\n"
+      "[settings]\nschema_version = 3\n[tui]\ncolorscheme = \"meringue\"\n"
     )
+  end
+
+  def navigate_to_category(name)
+    until @app.send(:settings_category) == name
+      send_key(TAB)
+    end
   end
 
   def send_key(key)

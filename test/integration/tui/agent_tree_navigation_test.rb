@@ -95,10 +95,11 @@ class TuiAgentTreeNavigationTest < Minitest::Test
     assert_equal "https://github.com/owner/repo/pull/3", Navigation.active_agent_pr_url(record)
   end
 
-  def test_only_github_pull_request_urls_are_recognized
+  def test_pull_request_urls_on_any_forge_host_are_recognized
     assert Navigation.pull_request_url?("https://github.com/owner/repo/pull/3")
     assert Navigation.pull_request_url?("https://github.com/owner/repo/pull/3?files=1")
-    refute Navigation.pull_request_url?("https://gitlab.com/owner/repo/pull/3")
+    assert Navigation.pull_request_url?("https://app.graphite.dev/pr/3")
+    assert Navigation.pull_request_url?("https://gitstream.shopify.io/shop/world/pr/42")
     refute Navigation.pull_request_url?("https://github.com/owner/repo/issues/3")
     refute Navigation.pull_request_url?("")
   end

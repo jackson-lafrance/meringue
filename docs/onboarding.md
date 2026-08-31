@@ -6,12 +6,12 @@ Setup is not a chat prompt and does not maintain a second settings implementatio
 
 ## Steps
 
-The centered card shows one dynamic `Step N of 5` indicator:
+The centered card shows one dynamic `Step N of 6` indicator:
 
 1. **Welcome** — what Meringue is, in the three nouns the rest of the flow depends on: you describe a goal, a head decides what should happen, workers do the work in their own worktrees. No controls; the navigation action is focused so Enter continues.
 2. **Harness** — the one decision Meringue cannot run without, asked once. A first run does not distinguish head from worker: there is a single **Harness** row, and the answer is applied to both roles. Options carry the product name and whether this machine can actually start them (`Claude Code · installed`, `Codex CLI · not found`). The **Preferred editor** row offers the concise command list `vim`, `nvim`, `emacs`, `cursor`, and `code`, plus **Custom** for a terminal editor or another command. GUI presets omit `--wait`, so opening them does not hold up Meringue. **Check harness** runs the selected backend once and reports what it answered. Splitting the roles deliberately is what `/config` is for.
 3. **Theme** — theme and animation preference. Theme changes preview immediately in memory.
-4. **Version control** — the selected backend and whether isolated mutable workspaces are ready. The built-in GitHub-backed backend requires a GitHub repository; alternate backends are documented in `docs/version-control-backends.md`.
+4. **Alternate backend** — the two axes an installation can swap out. **Git backend** confirms the default `github_git` backend that provisions and proves isolated mutable workspaces (an alternate backend such as gitstream plugs in through `docs/version-control-backends.md`). **Frontend** confirms the default GitHub frontend that answers pull-request questions — GitHub support is on by default — and an alternate frontend such as meteorite plugs in through `docs/forge-frontends.md`. **Test GitHub access** runs the read-only access check while the GitHub frontend is selected.
 5. **Meringue Xtras** — experiment controls derived directly from `Experiments::Registry`, all off until chosen.
 6. **Done** — the harness, theme, and experiments the Complete action is about to save, so finishing is checkable rather than hopeful.
 

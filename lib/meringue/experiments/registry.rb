@@ -72,28 +72,12 @@ module Meringue
 
     # The authoritative list of opt-in product capabilities. Settings and future
     # setup flows consume this registry directly; neither keeps a parallel list.
+    #
+    # GitHub support is deliberately absent: it stopped being an experiment and
+    # is default behavior, selected through the frontend axis under `[forge]`
+    # (see Meringue::Forge).
     module Registry
       DEFINITIONS = [
-        Definition.new(
-          id: "github_support",
-          config_path: %w[experiments github_support],
-          label: "GitHub support",
-          description: "Track, refresh, open, and retain work around GitHub pull requests.",
-          default: false,
-          restart_required: false,
-          risk: "May run bounded read-only gh lookups and show GitHub-specific delivery UI.",
-          dependencies: [],
-          conflicts: [],
-          migration: "enable_for_existing_installations",
-          actions: [
-            {
-              "id" => "github_support_test_access",
-              "label" => "Test GitHub access",
-              "description" => "Check GitHub authentication and read access to this repository without changing GitHub."
-            }
-          ],
-          availability_probe: nil
-        ),
         Definition.new(
           id: "agent_defaults_mode",
           config_path: AgentDefaultsMode::CONFIG_PATH,

@@ -79,7 +79,11 @@ module Meringue
         Do not include markdown, prose, code fences, or tool calls outside the JSON object.
         The "response" field is optional: omit it or use an empty string when routing only through commands, and never use JSON null. Escape newlines inside every JSON string value as \\n instead of writing literal line breaks, and never embed a ``` code fence inside a string value.
       PROMPT
-      PULL_REQUEST_URL_PATTERN = /https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+(?:[\/?#][^\s<>"'\])}]*)?/.freeze
+      # A pull-request link on any forge host: `/pull/N` or `/pr/N` after the host and
+      # any owner/repository path segments. GitHub (`github.com/owner/repo/pull/1`), Graphite
+      # (`app.graphite.dev/pr/1`), Meteorite-style hosts, and any private forge that follows
+      # the same shape all match; Meringue never assumes a PR link is a github.com URL.
+      PULL_REQUEST_URL_PATTERN = %r!https?://[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*?/(?:pull|pr)/\d+(?:[/?#][^\s<>"'\])}]+)?!.freeze
       PULL_REQUEST_ASSOCIATING_COMMANDS = %w[
         CreateIssue ModifyIssue SpawnWorker PromptAgent CreateGoal
       ].freeze

@@ -254,11 +254,6 @@ module Meringue
       # delivery PR. Unscoped, there is no single PR to mean, so it opens the picker
       # over every PR that is still open instead of guessing.
       def open_workspace_delivery_pr(state)
-        unless github_support_enabled?(state)
-          set_selection_status(github_support_disabled_message)
-          return false
-        end
-
         return open_delivery_pr_for_id(state, @agent_workspace_agent_id) if @agent_workspace_active
         return open_delivery_pr_for_id(state, normalized_selected_agent_id(state)) if @agent_tree_navigation_active
 
@@ -269,10 +264,6 @@ module Meringue
       end
 
       def open_delivery_pr_for_id(state, agent_id)
-        unless github_support_enabled?(state)
-          append_jump_response(github_support_disabled_message)
-          return false
-        end
         if agent_id.to_s.empty?
           append_jump_response("Select a worker before opening its delivery pull request.")
           return false

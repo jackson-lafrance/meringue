@@ -272,14 +272,17 @@ module Meringue
     module Schema
       # 2: the split-defaults and worker-guidance booleans became the three
       # modes of experiments.agent_defaults_mode.
-      VERSION = 2
+      # 3: experiments.github_support was removed — GitHub support became default
+      # behavior — and the frontend axis under `[forge]` replaced the experiment
+      # as the way to select an alternate code-hosting frontend.
+      VERSION = 3
       CATEGORIES = [
         "Agent defaults",
         "Appearance",
         "Experiments",
         "Harnesses",
         "Workspace",
-        "Version control",
+        "Alternate backend",
         "Safety",
         "Keybindings",
         "Setup"
@@ -404,6 +407,7 @@ module Meringue
         add_experiments(settings)
         add_harnesses(settings)
         add_workspace(settings)
+        add_alternate_backend(settings)
         add_safety(settings)
         add_keybindings(settings)
         add_setup(settings)
@@ -546,10 +550,25 @@ module Meringue
         settings << definition("harnesses.claude.use_json_schema", %w[harness claude use_json_schema], "Harnesses", "boolean", true, editor: "checkbox", label: "Claude JSON schema", description: "Ask Claude Code to constrain head output to the HeadResult schema.", advanced: true)
       end
 
+      BACKEND_OPTION_LABELS = {
+        "github_git" => "Git + GitHub",
+        "command" => "Alternate backend"
+      }.freeze
+      BACKEND_OPTION_DESCRIPTIONS = {
+        "github_git" => "Built-in Git worktrees; registration requires a GitHub origin.",
+        "command" => "Extension point for a pluggable backend such as gitstream; fails closed until one is implemented."
+      }.freeze
+      FRONTEND_OPTION_LABELS = {
+        "github" => "GitHub",
+        "command" => "Alternate frontend"
+      }.freeze
+      FRONTEND_OPTION_DESCRIPTIONS = {
+        "github" => "Built-in frontend: bounded read-only gh lookups for titles, verification, and status.",
+        "command" => "Extension point for a pluggable frontend such as meteorite; fails closed until one is implemented."
+      }.freeze
+
       def add_workspace(settings)
         settings.concat([
-          definition("version_control.backend", %w[version_control backend], "Version control", "enum", "github_git", options: %w[github_git command], editor: "selector", label: "Version-control backend", description: "Backend that provisions and proves isolated mutable workspaces.", advanced: true),
-          definition("version_control.command", %w[version_control command], "Version control", "command_argv", [], editor: "command", label: "Alternate backend command", description: "Optional executable implementing the documented alternate backend contract; no fallback is used.", advanced: true, optional: true),
           definition("workspace.worktree_provider", %w[workspace worktree_provider], "Workspace", "enum", "native_git", options: %w[native_git command], editor: "selector", label: "Legacy worktree provider", description: "Compatibility setting; new workers require explicit isolated-workspace evidence.", advanced: true),
           definition("workspace.worktree_provider_fallback", %w[workspace worktree_provider_fallback], "Workspace", "enum", "native_git", options: %w[native_git none], editor: "selector", label: "Worktree fallback", description: "Use native Git when the command provider is unavailable before it mutates a worktree.", advanced: true),
           definition("workspace.worktree_provider_command", %w[workspace worktree_provider_command], "Workspace", "command_argv", [], editor: "command", label: "Worktree provider command", description: "Executable argv prefix implementing the generic worktree provider protocol.", advanced: true, optional: true),
@@ -563,6 +582,21 @@ module Meringue
           definition("workspace.editor_args", %w[workspace editor_args], "Workspace", "string_list", ["."], editor: "list", label: "Editor arguments", description: "Arguments appended when opening a worker worktree.", advanced: true),
           definition("workspace.terminal_buffer_bytes", %w[workspace terminal_buffer_bytes], "Workspace", "integer", 4 * 1024 * 1024, editor: "integer", label: "Terminal buffer", description: "Maximum focused terminal output retained in bytes.", minimum: 4096, maximum: 256 * 1024 * 1024, advanced: true),
           definition("workspace.alacritty_command", %w[terminal alacritty_command], "Workspace", "command_argv", ->(_config, env) { env["MERINGUE_ALACRITTY_COMMAND"].to_s.empty? ? [] : [env["MERINGUE_ALACRITTY_COMMAND"]] }, editor: "command", label: "External terminal command", description: "Optional command used to open provider sessions externally.", override_env: %w[MERINGUE_ALACRITTY_COMMAND], advanced: true, optional: true)
+        ])
+      end
+
+      # The two axes an installation can swap out: which git backend provisions
+      # isolated mutable workspaces, and which code-hosting frontend answers
+      # pull-request questions. Both default to the built-in GitHub-backed pair;
+      # both `command` selections are documented extension points that fail
+      # closed rather than shipping a fake implementation.
+      def add_alternate_backend(settings)
+        settings.concat([
+          definition("version_control.backend", %w[version_control backend], "Alternate backend", "enum", "github_git", options: %w[github_git command], option_labels: BACKEND_OPTION_LABELS, option_descriptions: BACKEND_OPTION_DESCRIPTIONS, editor: "selector", label: "Git backend", description: "Backend that provisions and proves isolated mutable workspaces."),
+          definition("version_control.command", %w[version_control command], "Alternate backend", "command_argv", [], editor: "command", label: "Alternate backend command", description: "Optional executable implementing the documented alternate backend contract; no fallback is used.", advanced: true, optional: true),
+          definition("forge.frontend", %w[forge frontend], "Alternate backend", "enum", Meringue::Forge::DEFAULT_FRONTEND, options: Meringue::Forge::FRONTENDS, option_labels: FRONTEND_OPTION_LABELS, option_descriptions: FRONTEND_OPTION_DESCRIPTIONS, editor: "selector", label: "Frontend", description: "Code-hosting frontend used for pull-request lookups and delivery verification. GitHub is the default."),
+          definition("forge.command", %w[forge command], "Alternate backend", "command_argv", [], editor: "command", label: "Alternate frontend command", description: "Optional executable implementing the documented alternate frontend contract; no fallback is used.", advanced: true, optional: true),
+          definition("forge.test_github_access", nil, "Alternate backend", "action", nil, editor: "action", apply_mode: "none", label: "Test GitHub access", description: "Check GitHub authentication and read access to this repository without changing GitHub.", dependencies: ["forge.frontend"])
         ])
       end
 

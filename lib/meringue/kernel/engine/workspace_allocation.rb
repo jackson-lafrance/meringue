@@ -130,13 +130,18 @@ module Meringue
                      else
                        { "usable" => false, "reason" => "workspace_manager_does_not_support_shared_checkouts" }
                      end
-            if shared.is_a?(Hash) && shared.fetch("strategy", nil) == "shared_checkout" && shared.fetch("errors", []).empty?
+            if shared.is_a?(Hash) && ["shared_checkout", "project_root"].include?(shared.fetch("strategy", nil)) && shared.fetch("errors", []).empty?
+              note = if shared.fetch("strategy") == "project_root"
+                       "Project is not a Git repository; harness tools are restricted to read-only access in the project directory."
+                     else
+                       "Validated shared main checkout; harness tools are restricted to read-only access."
+                     end
               return shared.merge(
-                "workspace_strategy" => "shared_checkout",
+                "workspace_strategy" => shared.fetch("strategy"),
                 "workspace_mode" => requested_mode,
                 "effective_workspace_mode" => WORKSPACE_MODE_SHARED_READ_ONLY,
                 "plan" => shared,
-                "note" => "Validated shared main checkout; harness tools are restricted to read-only access."
+                "note" => note
               )
             end
             fallback_reason = shared.is_a?(Hash) ? shared.fetch("reason", "shared_checkout_unavailable") : "shared_checkout_unavailable"
@@ -173,7 +178,7 @@ module Meringue
             "plan" => nil, "created" => false,
             "errors" => ["version_control_backend_unavailable"],
             "failure_kind" => "version_control_backend_unavailable",
-            "note" => "Project has no validated isolated-workspace backend. Re-register or repair its version-control configuration."
+            "note" => "This project cannot provision an isolated mutable workspace (its directory is not a usable Git repository with a base ref). Spawn a shared_read_only worker to investigate, or register a Git repository for implementation work."
           }
         end
 

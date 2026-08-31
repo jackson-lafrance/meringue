@@ -9,14 +9,25 @@
 # outcome = "completed"   # or "skipped"
 
 [settings]
-schema_version = 2
+schema_version = 3
 
 [experiments]
-# New installations are local-first. Enable this for built-in gh title/status
-# lookups, delivery PR verification, markers, pickers, and opening actions.
-github_support = false
 # agent_defaults_mode = "role-specific"   # shared | role-specific | guided
 # worker_spawning_guidance_prompt = "Choose lighter models for routine work and stronger models for ambiguous or high-impact work. Set both model and thinking_level explicitly on every SpawnWorker."
+
+# The alternate backend section: which git backend provisions isolated
+# workspaces, and which code-hosting frontend answers pull-request questions.
+# Both default to the built-in GitHub-backed pair, so GitHub support is on
+# without any entry here.
+[forge]
+# frontend = "github"          # built-in GitHub frontend (default)
+# frontend = "command"         # extension point for an alternate frontend (e.g. meteorite)
+# command = ["/absolute/path/to/private-frontend-adapter"]
+
+# [version_control]
+# backend = "github_git"       # built-in Git + GitHub backend (default)
+# backend = "command"          # extension point for an alternate backend (e.g. gitstream)
+# command = ["/absolute/path/to/private-backend-adapter"]
 
 [tui]
 # Default yellow/white Meringue palette. Other options:

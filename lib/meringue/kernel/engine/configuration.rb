@@ -10,24 +10,11 @@ module Meringue
       private
 
       def test_github_access(command_id, command_type, payload)
-        enabled = synchronized_state { github_support_enabled?(normalized_state) }
-        # Setup sends this explicit marker while the user is editing the draft.
-        # It authorizes only this read-only diagnostic; it never changes the
-        # persisted setting or enables GitHub for other commands.
-        enabled ||= value_at(payload, "draft_github_support", "DraftGitHubSupport") == true
-        unless enabled
-          result = {
-            "outcome" => "disabled",
-            "message" => "GitHub support is disabled. Enable it in Settings → Experiments before testing access."
-          }
-          return accepted_result(command_id, command_type, nil, result.fetch("message"), result, [])
-        end
-
         repository, remote_error = github_access_repository(payload)
         unless repository
           result = {
             "outcome" => "malformed_remote",
-            "message" => remote_error || "The current repository does not have a supported GitHub origin remote."
+            "message" => remote_error || "The current repository does not have a forge origin remote the configured frontend can resolve."
           }
           return record_github_access_result(command_id, command_type, result)
         end
@@ -37,7 +24,7 @@ module Meringue
                  else
                    {
                      "outcome" => "unavailable",
-                     "message" => "The configured GitHub client cannot run an access check.",
+                     "message" => "The configured frontend cannot run an access check.",
                      "repository" => repository
                    }
                  end
@@ -48,16 +35,21 @@ module Meringue
           command_type,
           {
             "outcome" => "unavailable",
-            "message" => "GitHub access test was unavailable: #{e.message}",
+            "message" => "Forge access test was unavailable: #{e.message}",
             "repository" => repository
           }.compact
         )
       end
 
+      # The repository handle the active frontend uses for its access check. The
+      # GitHub frontend wants `owner/repo` and only resolves a github.com remote;
+      # a command frontend takes the raw origin URL and lets its adapter resolve
+      # it. A repository with no origin remote at all resolves to nil and is
+      # reported as malformed rather than failing the command.
       def github_access_repository(payload)
         requested = present_string(value_at(payload, "repository", "Repository"))
         if requested
-          return [requested, "The requested GitHub repository is malformed."] unless requested.match?(%r{\A[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\z})
+          return [requested, "The requested repository handle is malformed."] unless forge_repository_handle?(requested)
 
           return [requested, nil]
         end
@@ -69,14 +61,23 @@ module Meringue
 
           remote = present_string(stdout)
         end
-        repository = Forge::GitHubClient.repository_from_remote(remote)
-        return [repository, nil] if repository
+        return [nil, "The current repository has no origin remote for the configured frontend to check."] if remote.nil? || remote.empty?
 
-        [nil, "The current origin remote is not a supported GitHub repository URL."]
+        handle = forge_client.respond_to?(:repository_from_remote) ? forge_client.repository_from_remote(remote) : nil
+        return [handle, nil] if present_string(handle)
+
+        [nil, "The current origin remote is not one the configured frontend can resolve."]
       rescue Errno::ENOENT
         [nil, "Git is unavailable, so the current repository origin could not be checked."]
       rescue StandardError => e
         [nil, "The current repository origin could not be checked: #{e.message}"]
+      end
+
+      def forge_repository_handle?(handle)
+        return false if blank?(handle)
+        return handle.to_s.match?(%r{\A[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\z}) if Forge.github_frontend?(config)
+
+        !handle.to_s.strip.empty?
       end
 
       def invoke_forge_access_test(repository)
@@ -230,7 +231,7 @@ module Meringue
             "config_path" => config_path,
             "fingerprint" => transaction.fetch("fingerprint"),
             "theme" => theme,
-            "github_support" => github_support_enabled?(state.first),
+            "github_support" => forge_support_active?(state.first),
             "saved_but_overridden" => overridden_settings,
             "onboarding_outcome" => transaction["onboarding_outcome"],
             "onboarding_version" => transaction["onboarding_version"]

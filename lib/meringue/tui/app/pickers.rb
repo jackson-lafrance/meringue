@@ -396,11 +396,6 @@ module Meringue
       end
 
       def open_delivery_pr_picker(state)
-        unless github_support_enabled?(state)
-          append_jump_response(github_support_disabled_message)
-          return false
-        end
-
         entries = OpenPullRequests.entries(state)
         # Keep the empty explanation in the same bordered popup as a populated
         # picker. Previously `/prs`/Ctrl-B appended this expected state to chat,
@@ -484,7 +479,6 @@ module Meringue
 
       def open_delivery_pr_entry(entry)
         return false unless entry
-        return false unless github_support_enabled?
 
         result = pull_request_opener.open(entry.fetch("url"))
         return true if open_succeeded?(result)
@@ -497,11 +491,6 @@ module Meringue
       end
 
       def open_pr_by_agent_id(state, agent_id, silent_fail: false)
-        unless github_support_enabled?(state)
-          append_jump_response(github_support_disabled_message) unless silent_fail
-          return false
-        end
-
         record = pr_record_for_id(state, agent_id)
         unless record
           append_jump_response("Agent tree item #{agent_id} does not exist.") unless silent_fail

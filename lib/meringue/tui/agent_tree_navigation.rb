@@ -164,7 +164,7 @@ module Meringue
       end
 
       def pull_request_url?(url)
-        url.to_s.match?(%r{\Ahttps?://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/\d+(?:[/?#].*)?\z})
+        Forge.pull_request_url?(url)
       end
     end
   end
