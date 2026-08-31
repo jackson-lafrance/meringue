@@ -34,10 +34,11 @@ module Meringue
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
-        # PageUp/PageDown and every other non-leader key belong to the embedded
-        # application. In particular, do not page through Meringue's captured
-        # screen rows: that changes pixels without changing the harness's own
-        # history position.
+        if workspace_scroll_key?(remainder) && agent_workspace_scroll_max(state).positive?
+          scroll_agent_workspace(remainder, state)
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
         if @agent_workspace_view == "terminal"
           forward_agent_workspace_terminal_key(remainder, state)
         else

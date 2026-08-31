@@ -203,13 +203,7 @@ module Meringue
       # the focused pane, which is the older behavior.
       def handle_mouse_wheel_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         if embedded_agent_workspace? && pane_at_mouse_position(key, state) == "logs"
-          # A native harness owns its history. Scrolling Meringue's captured
-          # viewport only moves old pixels and leaves Pi, Claude, or another
-          # interactive backend unaware that the user asked to navigate. Route
-          # the wheel through the harness PTY adapter instead; it translates the
-          # event to portable page navigation. The separate worktree terminal
-          # keeps its existing outer-viewport behavior.
-          if @agent_workspace_view == "terminal" && agent_workspace_scroll_max(state).positive?
+          if agent_workspace_scroll_max(state).positive?
             scroll_agent_workspace(key, state)
           else
             # When the TUI has no retained rows of its own, let the focused harness keep

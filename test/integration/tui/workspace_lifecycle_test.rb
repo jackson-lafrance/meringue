@@ -771,7 +771,7 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     assert_equal [state.fetch("agents").first.fetch("id")], controller.detached
   end
 
-  def test_embedded_native_sessions_forward_page_keys_and_wheel_to_harness_history
+  def test_embedded_focused_pane_scrolls_captured_transcript_with_page_keys_and_wheel
     %w[pi claude custom].each do |harness|
       controller = InteractiveController.new
       # More captured rows than the pane can display reproduces the old branch
@@ -794,10 +794,12 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
       assert app.send(:open_agent_workspace_by_id, state, "P1-I1-W1")
       snapshot = app.send(:agent_workspace_snapshot, state, "", 0)
       focused_state = state.merge("_agent_workspace" => snapshot)
-      assert_equal 0, app.send(:agent_workspace_scroll_max, focused_state), harness
+      assert_operator app.send(:agent_workspace_scroll_max, focused_state), :>, 0, harness
 
       app.send(:handle_key, "\e[5~", "", 0, -1, nil, focused_state)
+      assert_operator app.instance_variable_get(:@workspace_agent_scroll_offset), :>, 0, harness
       app.send(:handle_key, "\e[6~", "", 0, -1, nil, focused_state)
+      assert_equal 0, app.instance_variable_get(:@workspace_agent_scroll_offset), harness
       app.send(
         :handle_key,
         { "type" => "mouse", "kind" => "wheel_down", "pressed" => true, "button" => 65, "count" => 2, "x" => 50, "y" => 3 },
@@ -808,13 +810,18 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
         focused_state
       )
 
-      assert_equal ["\e[5~", "\e[6~", "wheel_down"], controller.keys.map { |key| key.is_a?(Hash) ? key.fetch("kind") : key }, harness
-      wheel = controller.keys.last
-      assert_equal 2, wheel.fetch("count"), harness
-      assert wheel.fetch("x").between?(1, 100), harness
-      assert wheel.fetch("y").between?(1, 32), harness
+      assert_empty controller.keys, harness
       assert_equal 0, app.instance_variable_get(:@workspace_agent_scroll_offset), harness
-      assert_equal 0, app.send(:agent_workspace_snapshot, state, "", 0).fetch("scroll_offset"), harness
+      app.send(
+        :handle_key,
+        { "type" => "mouse", "kind" => "wheel_up", "pressed" => true, "button" => 64, "count" => 2, "x" => 50, "y" => 3 },
+        "",
+        0,
+        -1,
+        nil,
+        focused_state
+      )
+      assert_operator app.instance_variable_get(:@workspace_agent_scroll_offset), :>, 0, harness
     ensure
       app&.send(:close_agent_workspace)
     end

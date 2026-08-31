@@ -492,22 +492,27 @@ class KernelWorkersPromptAgentTest < Minitest::Test
     assert_equal "normal", @harness_client.prompts.fetch(0).fetch("mode")
   end
 
-  def test_worker_session_service_picks_steer_for_a_streaming_session
+  def test_worker_session_service_queues_a_follow_up_without_interrupting_a_streaming_session
     engine = build_engine
     worker_id = spawned_worker(engine)
     @harness_client.session_state = "streaming"
     session = Meringue::Sessions::WorkerSessionService.new(engine: engine).open(worker_id)
+    calls_before_prompt = @harness_client.calls.length
 
     begin
-      result = session.submit("Stop, wrong file.")
+      result = session.submit("Then check the tests.")
     ensure
       session.close
     end
 
     assert_equal "accepted", result.fetch("status")
-    assert_equal "steer", result.fetch("session_prompt_mode")
-    assert_equal "steer", @harness_client.prompts.fetch(0).fetch("mode")
-    assert_equal "steer_active_session", agent(engine, worker_id).fetch("harness_metadata").fetch("routing_action")
+    assert_equal "follow_up", result.fetch("session_prompt_mode")
+    assert_equal "follow_up", @harness_client.prompts.fetch(0).fetch("mode")
+    assert_equal ["prompt_session"], @harness_client.calls.drop(calls_before_prompt).map { |call| call.fetch("call") }
+    assert_empty @harness_client.aborts
+    assert_empty @harness_client.kills
+    assert_equal 1, @harness_client.spawns.length
+    assert_equal "queue_follow_up", agent(engine, worker_id).fetch("harness_metadata").fetch("routing_action")
   end
 
   def test_worker_session_service_rejects_an_empty_prompt_without_touching_the_harness
