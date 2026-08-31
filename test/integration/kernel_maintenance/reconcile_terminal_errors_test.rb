@@ -273,6 +273,62 @@ class KernelMaintenanceReconcileTerminalErrorsTest < Minitest::Test
     assert_documented_status_vocabulary(read_state)
   end
 
+  # A head record is saved before its harness session exists: `spawn_head` writes the record, then
+  # blocks in `spawn_head_session` while the provider starts. A reconcile tick that lands inside
+  # that window used to read the empty session as a finished turn with no output, fail the repair
+  # prompt with "no session id to resume", and settle the head as a terminal error - two seconds
+  # before its own "Started agent session" line.
+  def test_head_whose_session_is_still_spawning_is_not_reconciled
+    write_state(
+      state_fixture(
+        agents: [
+          head_record(
+            id: "H1",
+            status: "working",
+            harness: "claude",
+            created_at: Time.now.utc.iso8601,
+            harness_metadata: { "head_session_state" => "pending" }
+          )
+        ]
+      )
+    )
+    engine, client = build_stub_engine({ "default" => { "streaming" => false, "completed" => true } })
+
+    result = apply_command(engine, "ReconcileSessions", {})
+
+    assert_equal 0, result.dig("result", "checked_count")
+    assert_empty client.calls, "a head whose session is still spawning must not be polled"
+
+    state = read_state
+    head = agent_by_id(state, "H1")
+    assert_equal "working", head.fetch("status")
+    assert_equal "pending", head.dig("harness_metadata", "head_session_state")
+    assert_empty reconcile_error_logs(state, "H1")
+  end
+
+  # The pending marker is a startup window, not an amnesty: a head left pending by an instance that
+  # died mid-spawn is still recovered once the window expires.
+  def test_head_left_pending_past_the_spawn_window_is_still_reconciled
+    write_state(
+      state_fixture(
+        agents: [
+          head_record(
+            id: "H1",
+            status: "working",
+            harness: "claude",
+            created_at: (Time.now.utc - 600).iso8601,
+            harness_metadata: { "head_session_state" => "pending" }
+          )
+        ]
+      )
+    )
+    engine, = build_stub_engine({ "default" => { "streaming" => false, "completed" => true } })
+
+    result = apply_command(engine, "ReconcileSessions", {})
+
+    assert_equal 1, result.dig("result", "checked_count")
+  end
+
   # Standalone errored heads are cleared by /prune, not by reconciliation, so the record stays
   # visible in the AgentTree until the user asks for housekeeping.
   def test_settled_errored_head_is_retained_until_prune_removes_it

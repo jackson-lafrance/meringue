@@ -112,6 +112,26 @@ The spread only ever delays a refresh; it never cancels one.
 
 Terminal is the last rung, not the first. These are in-flight session-repair steps before a head becomes terminal; they are not the user-facing retry of an `errored`/`blocked` head row, which is manual via `/retry` and always starts a fresh head.
 
+0. **A head record that predates its own session is not judged at all.** `SpawnHead` saves
+   the head record and releases the state lock *before* it blocks in `spawn_head_session`
+   waiting for the provider to become ready to accept a prompt. For a PTY harness such as
+   Claude Code that wait is seconds (`ClaudeInteractiveClient::READY_TIMEOUT` allows up to
+   120, plus prompt delivery); for a JSON-RPC harness such as Pi it is well under one tick.
+   A reconcile pass landing inside that window used to see a head with no pid, no session id
+   and no transcript, read the empty session ref as a *finished* turn with no output, fail the
+   repair prompt with "claude session has no session id to resume", and settle the head as a
+   terminal error - emitting `Head Hn errored while reconciling its agent session.` two to
+   three seconds *before* that same head's `Started agent session for head Hn.` line, for a
+   head that then ran fine. The three existing graces could not catch it: `head_startup_grace_active?`
+   requires a live pid the record does not have yet, and the transient-error ladder below is only
+   reached when the poll itself raised, whereas this poll "succeeded". `Engine#recoverable_untracked_head?`
+   now excludes such a record via `head_session_spawn_in_flight?`: no session reference at all,
+   `head_session_state == "pending"` (written by `build_head_agent` for exactly this window and
+   nothing else), and younger than `HEAD_SESSION_SPAWN_GRACE_SECONDS`. The bound is sized to the
+   slowest supported spawn, not to a tick, and it is a window rather than an amnesty - a head left
+   `pending` by an instance that died mid-spawn becomes a candidate again once it expires. The
+   spawning thread owns failure inside the window; the fix is harness-agnostic, and no code on this
+   path branches on the provider name.
 1. **Head transient error inside the grace window** — the head stays `working`, one
    warning is logged (`warning_logged_at` makes it once, not per pass), and the pass
    retries.
