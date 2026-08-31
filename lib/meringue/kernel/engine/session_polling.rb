@@ -131,7 +131,30 @@ module Meringue
       end
 
       def recoverable_untracked_head?(agent)
-        agent.fetch("type", nil) == "head" && %w[queued working blocked errored].include?(agent.fetch("status", nil))
+        return false unless agent.fetch("type", nil) == "head"
+        return false unless %w[queued working blocked errored].include?(agent.fetch("status", nil))
+
+        !head_session_spawn_in_flight?(agent)
+      end
+
+      # A head record exists before its harness session does. `spawn_head` saves the record, releases
+      # the state lock, and only then blocks in `spawn_head_session` until the provider is ready to
+      # accept a prompt - seconds, for a PTY harness like Claude Code, against a 2s reconcile tick.
+      # A pass that lands inside that window sees a head with no pid, no session id and no
+      # transcript, reads it as a finished session with no output, and settles it as a terminal
+      # error for a head that is about to start working normally. `head_session_state` is `pending`
+      # for exactly that window and for nothing else, so it is what says "not started yet, do not
+      # judge it". The spawning thread owns failure here (`spawn_head` rescues and marks the head
+      # errored itself); the age bound is only so a head left pending by a crashed instance still
+      # becomes recoverable.
+      def head_session_spawn_in_flight?(agent)
+        return false if agent_has_session_reference?(agent)
+
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        return false unless metadata.is_a?(Hash)
+        return false unless metadata.fetch("head_session_state", nil) == HEAD_SESSION_STATE_PENDING
+
+        session_spawn_grace_active?(agent.fetch("created_at", nil), timestamp)
       end
 
       def poll_agent_session(agent)

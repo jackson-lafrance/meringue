@@ -381,6 +381,11 @@ module Meringue
       GOAL_COMPARATOR_TEXT = { "gte" => ">=", "lte" => "<=", "gt" => ">", "lt" => "<", "eq" => "==" }.freeze
       GATE_LABEL_MAX_CHARS = 48
       HEAD_RECONCILE_ERROR_GRACE_SECONDS = 30
+      # How long a head record may exist without a recorded harness session before reconciliation
+      # is willing to judge it. Sized to outlast the slowest supported head spawn rather than to a
+      # reconcile tick: ClaudeInteractiveClient::READY_TIMEOUT is 120s and prompt delivery follows
+      # it, so the 30s error grace above would reopen the same race on a slow machine.
+      HEAD_SESSION_SPAWN_GRACE_SECONDS = 180
       HEAD_RECONCILE_WARNING_DELAY_SECONDS = 5
       # Token-overlap ratio above which two clarifications from the same head are treated as
       # one restated question instead of two separate questions.

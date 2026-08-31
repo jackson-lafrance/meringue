@@ -942,6 +942,15 @@ module Meringue
         false
       end
 
+      # The window between a head record being saved and its harness session being recorded. It is
+      # bounded so a record left `pending` by an instance that died mid-spawn becomes recoverable
+      # again rather than being excused forever.
+      def session_spawn_grace_active?(started_at, now)
+        (Time.iso8601(now) - Time.iso8601(started_at.to_s)) < HEAD_SESSION_SPAWN_GRACE_SECONDS
+      rescue ArgumentError, TypeError
+        false
+      end
+
       # An interactive provider can have a live PTY before its transcript reader has observed the
       # first turn. In that narrow startup window, an empty/unknown conversation is not a completed
       # head result. Keep the head working while its owned process is alive; once the window expires,
