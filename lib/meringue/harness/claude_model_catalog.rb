@@ -67,7 +67,12 @@ module Meringue
         ModelCatalog.available(
           harness: "claude",
           models: entries,
-          source: SOURCE
+          source: SOURCE,
+          authentication: {
+            "status" => ModelCatalog::AUTHENTICATION_UNKNOWN,
+            "source" => SOURCE,
+            "reason" => "harness_did_not_report_auth"
+          }
         )
       end
 

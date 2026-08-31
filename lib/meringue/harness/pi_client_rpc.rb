@@ -151,6 +151,44 @@ module Meringue
         [command_timeout.to_i, DEFAULT_MODEL_CATALOG_TIMEOUT].max
       end
 
+      # `get_available_models` describes Pi's configured registry, not whether
+      # each provider can authenticate. Check each listed provider separately and
+      # retain only safe status/reason fields from Pi's auth command.
+      def model_catalog_authentication(models, cwd:)
+        providers = models.map { |model| model.fetch("provider", nil).to_s.strip }
+                     .reject(&:empty?).uniq.first(MAX_MODEL_AUTH_PROVIDERS)
+        statuses = providers.to_h do |provider|
+          [provider, provider_authentication(provider, cwd: cwd)]
+        end
+        {
+          "source" => MODEL_AUTH_SOURCE,
+          "providers" => statuses
+        }
+      end
+
+      def provider_authentication(provider, cwd:)
+        argv = Array(command).map(&:to_s) + without_options(extra_args, "--model", "--thinking") + [
+          "auth", "check", "--json", "--provider", provider, "--no-refresh"
+        ]
+        stdout, _stderr, status = Timeout.timeout(DEFAULT_MODEL_AUTH_TIMEOUT) do
+          Open3.capture3(process_environment(cwd), *argv, chdir: cwd)
+        end
+        payload = stdout.to_s.lines.reverse.filter_map do |line|
+          JSON.parse(line)
+        rescue JSON::ParserError
+          nil
+        end.find { |value| value.is_a?(Hash) }
+        return { "status" => ModelCatalog::AUTHENTICATION_UNKNOWN, "reason" => "invalid_auth_response" } unless payload
+
+        {
+          "status" => ModelCatalog.normalize_authentication_status(payload["status"]),
+          "reason" => payload["reason"],
+          "source" => payload["source"] || payload["credential_source"]
+        }.compact
+      rescue StandardError
+        { "status" => ModelCatalog::AUTHENTICATION_UNKNOWN, "reason" => "auth_check_failed" }
+      end
+
       def build_model_catalog_argv
         Array(command).map(&:to_s) + ["--mode", "rpc", "--no-session"] +
           without_options(extra_args, "--model", "--thinking")
@@ -178,7 +216,16 @@ module Meringue
           thinking_levels: supported_thinking_levels(model),
           reasoning: !!model["reasoning"],
           context_window: model["contextWindow"],
-          max_tokens: model["maxTokens"]
+          max_tokens: model["maxTokens"],
+          authentication: if model.key?("authentication")
+                            model["authentication"]
+                          elsif model.key?("auth")
+                            model["auth"]
+                          elsif model.key?("auth_status")
+                            model["auth_status"]
+                          else
+                            model["authenticated"]
+                          end
         )
       end
 

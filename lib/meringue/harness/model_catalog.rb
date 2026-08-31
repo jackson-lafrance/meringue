@@ -21,6 +21,18 @@ module Meringue
       # into: each client renders it in whatever flag its own CLI uses.
       THINKING_LEVELS = %w[off minimal low medium high xhigh max].freeze
       AVAILABLE = "available"
+      AUTHENTICATED = "authenticated"
+      UNAUTHENTICATED = "unauthenticated"
+      AUTHENTICATION_UNKNOWN = "unknown"
+      AUTHENTICATION_UNAVAILABLE = "unavailable"
+      AUTHENTICATION_PARTIAL = "partial"
+      AUTHENTICATION_STATUSES = [
+        AUTHENTICATED,
+        UNAUTHENTICATED,
+        AUTHENTICATION_UNKNOWN,
+        AUTHENTICATION_UNAVAILABLE,
+        AUTHENTICATION_PARTIAL
+      ].freeze
       # A previously confirmed list whose latest refresh failed. The models are
       # still the harness's own answer, just older than we would like, so they
       # stay listed instead of collapsing back to whatever Meringue remembers.
@@ -33,14 +45,21 @@ module Meringue
       # persistence bound rather than trusting provider output size.
       MAX_MODELS = 2_000
       MAX_REFERENCE_BYTES = 4_096
+      MAX_AUTH_PROVIDERS = 256
+      MAX_NAME_BYTES = 512
+      MAX_THINKING_LEVELS = 32
+      MAX_THINKING_LEVEL_BYTES = 32
 
-      ENTRY_KEYS = %w[reference provider id name thinking_levels reasoning context_window max_tokens].freeze
+      ENTRY_KEYS = %w[
+        reference provider id name thinking_levels reasoning context_window max_tokens authentication
+      ].freeze
+      HEAD_ENTRY_KEYS = ENTRY_KEYS.freeze
 
       attr_reader :harness, :availability, :models, :note, :reason, :source, :fetched_at, :error,
-                  :last_attempt_at, :last_error
+                  :last_attempt_at, :last_error, :authentication
 
       class << self
-        def available(harness:, models:, source: nil, fetched_at: nil)
+        def available(harness:, models:, source: nil, fetched_at: nil, authentication: nil, auth: nil)
           entries = normalize_entries(models)
           if entries.empty?
             return unavailable(
@@ -48,7 +67,8 @@ module Meringue
               note: "#{harness} reported no available models. Check provider auth and model configuration.",
               source: source,
               reason: EMPTY_CATALOG_REASON,
-              fetched_at: fetched_at
+              fetched_at: fetched_at,
+              authentication: authentication.nil? ? auth : authentication
             )
           end
 
@@ -57,11 +77,13 @@ module Meringue
             availability: AVAILABLE,
             models: entries,
             source: source,
-            fetched_at: fetched_at
+            fetched_at: fetched_at,
+            authentication: authentication.nil? ? auth : authentication
           )
         end
 
-        def unavailable(harness:, note:, source: nil, reason: nil, error: nil, fetched_at: nil)
+        def unavailable(harness:, note:, source: nil, reason: nil, error: nil, fetched_at: nil,
+                        authentication: nil, auth: nil)
           new(
             harness: harness,
             availability: UNAVAILABLE,
@@ -70,11 +92,12 @@ module Meringue
             reason: reason || "unavailable",
             source: source,
             error: error,
-            fetched_at: fetched_at
+            fetched_at: fetched_at,
+            authentication: authentication.nil? ? (auth.nil? ? { "status" => AUTHENTICATION_UNAVAILABLE } : auth) : authentication
           )
         end
 
-        def unsupported(harness:, note: nil, source: nil, fetched_at: nil)
+        def unsupported(harness:, note: nil, source: nil, fetched_at: nil, authentication: nil, auth: nil)
           new(
             harness: harness,
             availability: UNSUPPORTED,
@@ -82,7 +105,8 @@ module Meringue
             note: note || "#{harness} does not expose a model catalog yet.",
             reason: "unsupported_harness",
             source: source,
-            fetched_at: fetched_at
+            fetched_at: fetched_at,
+            authentication: authentication.nil? ? (auth.nil? ? { "status" => AUTHENTICATION_UNAVAILABLE } : auth) : authentication
           )
         end
 
@@ -104,7 +128,8 @@ module Meringue
             error: previous.error,
             fetched_at: previous.fetched_at,
             last_attempt_at: last_attempt_at || Time.now.utc.iso8601,
-            last_error: failure.error || failure.reason
+            last_error: failure.error || failure.reason,
+            authentication: previous.authentication
           )
         end
 
@@ -129,12 +154,14 @@ module Meringue
             error: hash["error"],
             fetched_at: hash["fetched_at"],
             last_attempt_at: hash["last_attempt_at"],
-            last_error: hash["last_error"]
+            last_error: hash["last_error"],
+            authentication: hash.key?("authentication") ? hash["authentication"] : hash["auth"]
           )
         end
 
         def entry(provider:, id:, name: nil, thinking_levels: nil, reasoning: nil,
-                  context_window: nil, max_tokens: nil)
+                  context_window: nil, max_tokens: nil, authentication: nil, auth: nil,
+                  authenticated: nil)
           normalize_entry(
             "provider" => provider,
             "id" => id,
@@ -142,7 +169,14 @@ module Meringue
             "thinking_levels" => thinking_levels,
             "reasoning" => reasoning,
             "context_window" => context_window,
-            "max_tokens" => max_tokens
+            "max_tokens" => max_tokens,
+            "authentication" => if !authentication.nil?
+                                  authentication
+                                elsif !auth.nil?
+                                  auth
+                                else
+                                  authenticated
+                                end
           )
         end
 
@@ -164,15 +198,119 @@ module Meringue
             "reference" => "#{provider}/#{id}",
             "provider" => provider,
             "id" => id,
-            "name" => present(model["name"]) ? model["name"].to_s : nil,
+            "name" => bounded_string(model["name"], MAX_NAME_BYTES),
             "thinking_levels" => normalize_thinking_levels(model["thinking_levels"] || model["thinkingLevels"]),
             "reasoning" => boolean_or_nil(model["reasoning"]),
             "context_window" => integer_or_nil(model["context_window"] || model["contextWindow"]),
-            "max_tokens" => integer_or_nil(model["max_tokens"] || model["maxTokens"])
+            "max_tokens" => integer_or_nil(model["max_tokens"] || model["maxTokens"]),
+            "authentication" => normalize_authentication_status(
+              model.key?("authentication") ? model["authentication"] :
+                (model.key?("auth") ? model["auth"] :
+                  (model.key?("auth_status") ? model["auth_status"] : model["authenticated"]))
+            )
           }.compact
         end
 
+        # Authentication is a small, optional contract. A harness may provide a
+        # single status or one status per provider, but never credentials.
+        def normalize_authentication_metadata(value)
+          return nil if value.nil?
+
+          if value.is_a?(Hash)
+            hash = stringify(value)
+            providers = hash["providers"]
+            if providers.nil?
+              provider_values = hash.reject { |key, _value| %w[status source reason].include?(key) }
+              providers = provider_values unless provider_values.empty?
+            end
+            normalized_providers = if providers.is_a?(Hash)
+                                     providers.to_a.first(MAX_AUTH_PROVIDERS).each_with_object({}) do |(provider, detail), result|
+                                       provider_name = normalize_authentication_token(provider)
+                                       normalized = normalize_authentication_detail(detail)
+                                       result[provider_name] = normalized if provider_name && normalized
+                                     end
+                                   else
+                                     {}
+                                   end
+            status = normalize_authentication_status(hash.key?("status") ? hash["status"] : hash["authenticated"])
+            status = aggregate_authentication_status(normalized_providers.values) if status.nil? && !normalized_providers.empty?
+            status ||= AUTHENTICATION_UNKNOWN
+            {
+              "status" => status,
+              "source" => normalize_authentication_token(hash["source"]),
+              "reason" => normalize_authentication_token(hash["reason"]),
+              "providers" => normalized_providers
+            }.compact.tap { |result| result.delete("providers") if result["providers"].empty? }
+          else
+            { "status" => normalize_authentication_status(value) || AUTHENTICATION_UNKNOWN }
+          end
+        end
+
+        def normalize_authentication_status(value)
+          return AUTHENTICATED if value == true
+          return UNAUTHENTICATED if value == false
+          return nil if value.nil?
+
+          value = if value.is_a?(Hash)
+                    if value.key?("status")
+                      value["status"]
+                    elsif value.key?(:status)
+                      value[:status]
+                    else
+                      value["authenticated"]
+                    end
+                  else
+                    value
+                  end
+          case value.to_s.strip.downcase
+          when "authenticated", "ready", "ok", "available"
+            AUTHENTICATED
+          when "unauthenticated", "not_authenticated", "not_ready", "credentials_not_configured"
+            UNAUTHENTICATED
+          when "unavailable", "unsupported", "error", "failed"
+            AUTHENTICATION_UNAVAILABLE
+          when "partial", "partially_authenticated", "mixed"
+            AUTHENTICATION_PARTIAL
+          when "unknown", "", "not_checked"
+            AUTHENTICATION_UNKNOWN
+          else
+            AUTHENTICATION_UNKNOWN
+          end
+        end
+
         private
+
+        def normalize_authentication_detail(value)
+          detail = value.is_a?(Hash) ? stringify(value) : { "status" => value }
+          status = normalize_authentication_status(
+            detail.key?("status") ? detail["status"] : detail["authenticated"]
+          )
+          return nil unless status
+
+          {
+            "status" => status,
+            "source" => normalize_authentication_token(detail["source"]),
+            "reason" => normalize_authentication_token(detail["reason"])
+          }.compact
+        end
+
+        def normalize_authentication_token(value)
+          text = value.to_s.strip
+          return nil if text.empty?
+          return nil unless text.bytesize <= 128 && text.match?(/\A[a-zA-Z0-9_.:-]+\z/)
+
+          text
+        end
+
+        def aggregate_authentication_status(details)
+          statuses = details.filter_map { |detail| detail.is_a?(Hash) ? detail["status"] : nil }.uniq
+          return AUTHENTICATED if statuses == [AUTHENTICATED]
+          return UNAUTHENTICATED if statuses == [UNAUTHENTICATED]
+          return AUTHENTICATION_UNAVAILABLE if statuses == [AUTHENTICATION_UNAVAILABLE]
+          return AUTHENTICATION_UNKNOWN if statuses.empty? || statuses == [AUTHENTICATION_UNKNOWN]
+
+          AUTHENTICATION_PARTIAL
+        end
 
         # A model id may itself contain slashes, so a reference is split on the
         # first slash only, exactly as the harness does. See `ModelReference`.
@@ -189,7 +327,10 @@ module Meringue
         end
 
         def normalize_thinking_levels(levels)
-          normalized = Array(levels).map { |level| level.to_s.strip.downcase }.reject(&:empty?).uniq
+          normalized = Array(levels).filter_map do |level|
+            value = bounded_string(level, MAX_THINKING_LEVEL_BYTES)&.strip&.downcase
+            value unless value.to_s.empty?
+          end.uniq.first(MAX_THINKING_LEVELS)
           normalized.empty? ? nil : normalized
         end
 
@@ -211,16 +352,22 @@ module Meringue
           !value.nil? && !value.to_s.strip.empty?
         end
 
+        def bounded_string(value, bytes)
+          return nil unless present(value)
+
+          value.to_s.byteslice(0, bytes).to_s.scrub
+        end
+
         def stringify(hash)
           hash.each_with_object({}) { |(key, value), result| result[key.to_s] = value }
         end
       end
 
       def initialize(harness:, availability:, models: [], note: nil, reason: nil, source: nil,
-                     error: nil, fetched_at: nil, last_attempt_at: nil, last_error: nil)
+                     error: nil, fetched_at: nil, last_attempt_at: nil, last_error: nil,
+                     authentication: nil, auth: nil)
         @harness = harness.to_s
         @availability = availability.to_s
-        @models = self.class.normalize_entries(models)
         @note = note.nil? ? nil : note.to_s
         @reason = reason.nil? ? nil : reason.to_s
         @source = source.nil? ? nil : source.to_s
@@ -228,6 +375,8 @@ module Meringue
         @fetched_at = fetched_at.nil? ? Time.now.utc.iso8601 : fetched_at.to_s
         @last_attempt_at = last_attempt_at.nil? ? nil : last_attempt_at.to_s
         @last_error = last_error.nil? ? nil : last_error.to_s
+        @authentication = self.class.normalize_authentication_metadata(authentication.nil? ? auth : authentication)
+        @models = apply_provider_authentication(self.class.normalize_entries(models))
       end
 
       def available?
@@ -267,6 +416,49 @@ module Meringue
         entry_for(reference)&.fetch("thinking_levels", nil)
       end
 
+      def authentication_for(reference)
+        entry = entry_for(reference)
+        return nil unless entry
+
+        return entry.fetch("authentication") if entry.key?("authentication")
+
+        providers = authentication.is_a?(Hash) ? authentication.fetch("providers", {}) : {}
+        provider_detail = providers.fetch(entry.fetch("provider"), nil)
+        return self.class.normalize_authentication_status(provider_detail) if provider_detail
+
+        authentication.is_a?(Hash) ? authentication.fetch("status", nil) : nil
+      end
+
+      alias auth_status_for authentication_for
+
+      def authenticated?(reference)
+        authentication_for(reference) == AUTHENTICATED
+      end
+
+      # Head context can include this bounded, secret-free view. Raw notes,
+      # errors, and harness metadata stay in the kernel-facing snapshot only.
+      def to_head_h(role: nil)
+        head_authentication = authentication || {
+          "status" => availability == AVAILABLE ? AUTHENTICATION_UNKNOWN : AUTHENTICATION_UNAVAILABLE
+        }
+        {
+          "role" => role,
+          "harness" => harness,
+          "availability" => availability,
+          "authentication" => head_authentication,
+          "model_count" => model_count,
+          "models" => models.map do |model|
+            model.slice(*HEAD_ENTRY_KEYS).tap do |entry|
+              entry["authentication"] ||= authentication_for(model.fetch("reference")) || AUTHENTICATION_UNKNOWN
+            end
+          end,
+          "source" => source,
+          "fetched_at" => fetched_at,
+          "last_attempt_at" => last_attempt_at,
+          "reason" => reason
+        }.compact
+      end
+
       # Seconds since this snapshot was taken, or nil when the timestamp is
       # unusable. Refresh policy lives in the kernel, not in the snapshot.
       def age_seconds(now: Time.now.utc)
@@ -286,6 +478,7 @@ module Meringue
           "availability" => availability,
           "model_count" => model_count,
           "models" => models,
+          "authentication" => authentication,
           "note" => note,
           "reason" => reason,
           "source" => source,
@@ -299,6 +492,22 @@ module Meringue
       alias to_hash to_h
 
       private
+
+      def apply_provider_authentication(entries)
+        return entries unless authentication.is_a?(Hash)
+
+        providers = authentication.fetch("providers", {})
+        entries.map do |entry|
+          status = if entry.key?("authentication")
+                     entry.fetch("authentication")
+                   elsif providers.is_a?(Hash) && providers.key?(entry.fetch("provider"))
+                     self.class.normalize_authentication_status(providers.fetch(entry.fetch("provider")))
+                   elsif authentication.fetch("status", nil) != AUTHENTICATION_UNKNOWN
+                     authentication.fetch("status", nil)
+                   end
+          status ? entry.merge("authentication" => status) : entry
+        end
+      end
 
       def seconds_since(timestamp, now)
         reference = Time.iso8601(timestamp.to_s)

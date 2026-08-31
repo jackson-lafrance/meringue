@@ -169,7 +169,7 @@ module HarnessSupport
     config = ENV["PI_STUB_CONFIG"] ? JSON.parse(File.read(ENV["PI_STUB_CONFIG"])) : {}
     $stdout.sync = true
 
-    if config["argv_log"]
+    if config["argv_log"] && !(ARGV.include?("auth") && ARGV.include?("check"))
       File.write(config["argv_log"], JSON.generate(ARGV))
     end
     if config["env_log"]
@@ -206,6 +206,16 @@ module HarnessSupport
 
       prefix = "#{name}="
       ARGV.find { |argument| argument.start_with?(prefix) }&.delete_prefix(prefix)
+    end
+
+    # Pi auth checks are separate short-lived CLI calls, so answer them before
+    # entering the RPC stdin loop. Tests can set auth_statuses by provider.
+    if ARGV.include?("auth") && ARGV.include?("check")
+      provider = argv_option("--provider")
+      auth = config.fetch("auth_statuses", {}).fetch(provider, { "status" => "ready", "source" => "test" })
+      auth = { "status" => auth } unless auth.is_a?(Hash)
+      $stdout.write(JSON.generate(auth) + "\n")
+      exit(config.fetch("auth_exit_code", 0))
     end
 
     configured_model = config.fetch("model", { "provider" => "anthropic", "id" => "claude-opus-5", "name" => "Claude Opus 5" })

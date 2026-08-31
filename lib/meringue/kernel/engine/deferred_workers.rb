@@ -375,7 +375,8 @@ module Meringue
                                 requested_workspace_path:, follow_up_of_agent_id:, predecessor:,
                                 chain_depth:, failure_policy:, include_predecessor_result:, completion_continuation:,
                                 rerouted_from_issue_id:, command_gate: nil, workspace_reuse_request: nil,
-                                session_settings_override: {}, workspace_mode: WORKSPACE_MODE_ISOLATED,
+                                session_settings_override: {}, model_validation: nil,
+                                workspace_mode: WORKSPACE_MODE_ISOLATED,
                                 self_fixing_recovery: nil)
         now = timestamp
         agent_id = next_worker_id!(state, issue.fetch("id"))
@@ -410,6 +411,7 @@ module Meringue
           after_agent_id: predecessor && predecessor.fetch("id"),
           completion_continuation: completion_continuation,
           session_settings_override: session_settings_override,
+          model_validation: model_validation,
           workspace_reuse_request: workspace_reuse_request,
           workspace_mode: workspace_mode,
           self_fixing_recovery: self_fixing_recovery,

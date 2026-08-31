@@ -134,6 +134,7 @@ module Meringue
           "state_access" => state_access,
           "project_discovery" => project_discovery,
           "current_state_summary" => current_state_summary,
+          "active_harness_model_catalog" => active_harness_model_catalog,
           "routing_context" => routing_context,
           "worker_selection_catalog" => worker_selection_catalog,
           "additional_system_prompt" => guidance_text,
@@ -256,14 +257,14 @@ module Meringue
           return {
             "read_only" => true,
             "privacy_filtered" => true,
-            "guidance" => "Use the supplied routing context and worker-selection catalog. The persisted state path is intentionally withheld so configured and effective worker model/thinking selections cannot enter this head session."
+            "guidance" => "Use the supplied routing context, active_harness_model_catalog, and worker-selection guidance. The persisted state path is intentionally withheld so configured and effective worker model/thinking selections cannot enter this head session. Do not choose an unauthenticated model; unknown authentication needs GetModelCatalog with refresh."
           }
         end
 
         {
           "state_path" => state_path,
           "read_only" => true,
-          "guidance" => "The full Meringue state is intentionally not embedded. Read this file only when the user request requires current projects, issues, agents, questions, logs, counters, prior PR URLs, or a follow-up/refinement may depend on a head that was still routing when you spawned. Use only ids that actually appear in state; never invent future issue ids.",
+          "guidance" => "The full Meringue state is intentionally not embedded. Read this file only when the user request requires current projects, issues, agents, questions, logs, counters, prior PR URLs, or a follow-up/refinement may depend on a head that was still routing when you spawned. Use only ids that actually appear in state; never invent future issue ids. Before naming SpawnWorker.model, use active_harness_model_catalog for the active worker harness. Do not invent a reference when the catalog is unavailable or authentication is unknown.",
           "suggested_commands" => [
             {
               "purpose" => "Read full JSON state when necessary.",
@@ -279,26 +280,42 @@ module Meringue
         }
       end
 
+      def active_harness_model_catalog(role: "worker")
+        metadata = snapshot.fetch("metadata", {}) || {}
+        normalized_role = role.to_s == "head" ? "head" : "worker"
+        harness = metadata.fetch("active_#{normalized_role}_harness", metadata.fetch("active_harness", nil)).to_s
+        catalogs = metadata.fetch("harness_model_catalogs", {}) || {}
+        selected = catalogs[harness]
+        catalog = if selected.is_a?(Hash)
+                    Meringue::Harness::ModelCatalog.coerce(selected, harness: harness)
+                  else
+                    Meringue::Harness::ModelCatalog.unavailable(
+                      harness: harness.empty? ? "unknown" : harness,
+                      note: "No cached model catalog has been fetched yet.",
+                      reason: "not_fetched",
+                      authentication: { "status" => Meringue::Harness::ModelCatalog::AUTHENTICATION_UNKNOWN }
+                    )
+                  end
+        head_catalog = catalog.to_head_h(role: normalized_role)
+        head_catalog["instruction"] = if catalog.available?
+                                         "Choose a model from this active harness catalog. Use only entries with authentication authenticated."
+                                       elsif catalog.stale?
+                                         "This is the last confirmed catalog. Refresh it before relying on a model or report the stale state."
+                                       elsif catalog.unsupported?
+                                         "This harness cannot list models here. Do not invent a model reference; propose GetModelCatalog and report unsupported."
+                                       else
+                                         "The active harness did not provide a usable catalog. Do not invent a model reference; propose GetModelCatalog with refresh."
+                                       end
+        head_catalog
+      end
+
       def worker_selection_catalog
         return nil unless worker_spawning_guidance
 
-        metadata = snapshot.fetch("metadata", {}) || {}
-        harness = metadata.fetch("active_worker_harness", metadata.fetch("active_harness", nil)).to_s
-        catalogs = metadata.fetch("harness_model_catalogs", {}) || {}
-        selected = catalogs[harness]
-        models = selected.is_a?(Hash) ? Array(selected["models"]) : []
-        {
-          "harness" => (harness unless harness.empty?),
-          "availability" => (selected["availability"] if selected.is_a?(Hash)),
-          "models" => models.filter_map do |model|
-            next unless model.is_a?(Hash)
-            next if @hidden_worker_model_references.include?(model.fetch("reference", "").to_s.strip.downcase)
-
-            model.slice("reference", "provider", "id", "name", "thinking_levels", "context_window")
-          end,
+        active_harness_model_catalog(role: "worker").merge(
           "accepted_thinking_levels" => Meringue::Harness::ModelCatalog::THINKING_LEVELS,
-          "instruction" => "Choose only from this catalog when it is available. Apply the guidance to the task and set both model and thinking_level explicitly on every SpawnWorker."
-        }.compact
+          "instruction" => "Choose only from this catalog when it is available. Do not choose unauthenticated entries. Apply the guidance to the task and set both model and thinking_level explicitly on every SpawnWorker."
+        )
       end
 
       def current_state_summary
@@ -374,9 +391,9 @@ module Meringue
 
       def worker_selection_routing_rule
         if worker_spawning_guidance
-          "Set both SpawnWorker.model and SpawnWorker.thinking_level on every new worker. An explicit model or thinking level in the user message takes precedence; otherwise choose only by applying the supplied worker-selection guidance to the task and using worker_selection_catalog."
+          "Set both SpawnWorker.model and SpawnWorker.thinking_level on every new worker. An explicit model or thinking level in the user message takes precedence; otherwise choose only by applying the supplied worker-selection guidance to the task and using worker_selection_catalog. Never choose an unauthenticated entry."
         else
-          "When the user names a model or thinking level for a new worker, put it in SpawnWorker.model and/or SpawnWorker.thinking_level. These override only that worker. Omit unspecified fields so the configured future-session defaults still apply; thinking levels are off, minimal, low, medium, high, xhigh, and max."
+          "When the user names a model or thinking level for a new worker, put it in SpawnWorker.model and/or SpawnWorker.thinking_level. Before naming a model, use active_harness_model_catalog and choose an authenticated entry when the catalog is available. These fields override only that worker. Omit unspecified fields so the configured future-session defaults still apply; thinking levels are off, minimal, low, medium, high, xhigh, and max. If the catalog is unavailable or authentication is unknown, do not invent a reference; propose GetModelCatalog with refresh or report the unverified choice."
         end
       end
 

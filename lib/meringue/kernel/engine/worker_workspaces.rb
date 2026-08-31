@@ -12,7 +12,8 @@ module Meringue
       def build_worker_reservation(agent_id:, issue:, project:, workspace:, provider:, command_id:, prompt:, title:,
                                    requested_workspace_path:, follow_up_of_agent_id:, replace_agent_id:, now:, harness_generation:,
                                    after_agent_id: nil, completion_continuation: nil, workspace_reuse_request: nil,
-                                   session_settings_override: {}, workspace_mode: WORKSPACE_MODE_ISOLATED, portable_import: nil,
+                                   session_settings_override: {}, model_validation: nil,
+                                   workspace_mode: WORKSPACE_MODE_ISOLATED, portable_import: nil,
                                    self_fixing_recovery: nil)
         plan = workspace.fetch("plan", nil) || workspace
         {
@@ -41,6 +42,7 @@ module Meringue
             "spawn_command_id" => command_id,
             "spawn_prompt" => prompt.to_s,
             "spawn_session_settings" => session_settings_override.empty? ? nil : deep_copy(session_settings_override),
+            "model_validation" => model_validation,
             "requested_workspace_path" => present_string(requested_workspace_path),
             "workspace_mode" => workspace_mode,
             "follow_up_of_agent_id" => present_string(follow_up_of_agent_id),

@@ -79,6 +79,27 @@ class KernelCoreModelCatalogTest < Minitest::Test
     )
   end
 
+  def test_role_selects_the_active_role_harness_when_no_harness_is_supplied
+    split_engine = build_engine(
+      store: Meringue::State::Store.new(path: File.join(tmp_root, "split-roles.json")),
+      default_head_harness_provider: "claude",
+      default_worker_harness_provider: "pi",
+      model_catalog_provider: ->(provider) { @catalog_source.call(provider) }
+    )
+
+    head_result = split_engine.apply("type" => "GetModelCatalog", "payload" => { "role" => "head" })
+    worker_result = split_engine.apply("type" => "GetModelCatalog", "payload" => { "role" => "worker" })
+
+    assert_equal "accepted", head_result.fetch("status")
+    assert_equal "claude", head_result.dig("result", "harness")
+    assert_equal "accepted", worker_result.fetch("status")
+    assert_equal "pi", worker_result.dig("result", "harness")
+    assert_equal %w[claude pi], @catalog_source.calls
+
+    invalid = split_engine.apply("type" => "GetModelCatalog", "payload" => { "role" => "admin" })
+    assert_rejected(invalid, "role must be one of: head, worker")
+  end
+
   def test_an_explicit_harness_is_honoured_and_unknown_harnesses_are_rejected
     result = apply_command("GetModelCatalog", "harness" => "claude")
 

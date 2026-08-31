@@ -81,6 +81,8 @@ A head may put optional `model` and `thinking_level` fields on a `SpawnWorker` p
 
 Omission is meaningful. An omitted field remains late-bound to the configured future-session default when the worker actually starts. This applies to queued workers too, so a worker queued without overrides uses the defaults in force at activation rather than freezing a copy when it was queued. Explicit overrides are persisted as reservation intent and survive deferred activation and provisioning recovery. Before activation a queued worker has no effective `session_settings`; after launch the harness-reported effective pair is stored on the worker record and shown through the existing focused-workspace and `GetInfo` surfaces.
 
+When a head supplies `SpawnWorker.model`, the kernel checks the cached catalog for the active worker harness before it allocates a workspace. An `available` catalog rejects a reference it does not list, unless the catalog reached its `2,000`-entry bound, and rejects an entry whose provider is explicitly `unauthenticated`. A listed entry with `authenticated`, `unknown`, or `unavailable` authentication proceeds with a recorded `verified` or `unverified` status. A `stale`, `unavailable`, `unsupported`, or not-yet-fetched catalog does not block a well-formed override; the reservation and lifecycle log say that the model is unverified. This check never starts a harness process, so refresh first with `GetModelCatalog` or `/models refresh` when the cached state is degraded.
+
 ### The accepted model-reference grammar
 
 One place owns Meringue's accepted rule (`Meringue::Harness::ModelReference`). It preserves the provider-qualified references harnesses report instead of imposing a stricter one-slash shape. Pi, for example, resolves a reference by splitting on the **first** slash (`resolveModel` / `findExactModelReferenceMatch`), so the shared grammar does too:
@@ -208,6 +210,14 @@ Discovery is harness-neutral. A harness client answers `available_models`, and M
 {
   "harness": "pi",
   "availability": "available",
+  "authentication": {
+    "status": "partial",
+    "source": "pi_auth_check",
+    "providers": {
+      "anthropic": { "status": "authenticated", "source": "stored" },
+      "openai": { "status": "unauthenticated", "reason": "credentials_not_configured" }
+    }
+  },
   "model_count": 119,
   "source": "pi_rpc_get_available_models",
   "fetched_at": "2026-07-29T18:55:30Z",
@@ -220,11 +230,14 @@ Discovery is harness-neutral. A harness client answers `available_models`, and M
       "thinking_levels": ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
       "reasoning": true,
       "context_window": 1000000,
-      "max_tokens": 128000
+      "max_tokens": 128000,
+      "authentication": "authenticated"
     }
   ]
 }
 ```
+
+The optional `authentication` object is harness-neutral. Its status is `authenticated`, `unauthenticated`, `unknown`, `unavailable`, or `partial`; provider entries may add only bounded `source` and `reason` values. Authentication metadata never contains credentials or arbitrary harness output. The model list is the harness's configured answer, not a manually maintained provider registry. Pi's list reflects configured model availability, and an authenticated status means Pi's auth check reports usable credentials for that provider; it does not promise that every provider model is a complete public inventory.
 
 `availability` is one of:
 
@@ -233,11 +246,13 @@ Discovery is harness-neutral. A harness client answers `available_models`, and M
 - `unavailable`: the harness answered with an empty list (`reason: "empty_catalog"`) or could not be reached (`reason: "fetch_failed"`) and there is no earlier list to keep, with `note` carrying the harness's own explanation.
 - `unsupported`: the harness has no catalog API, or this Meringue instance was built without a catalog source.
 
+Authentication is independent of catalog availability. `authenticated` means the harness reports usable provider credentials, `unauthenticated` means it reports that credentials are not ready, `unknown` means it did not answer with a usable auth result, and `unavailable` means the auth check itself is unavailable. `partial` aggregates mixed provider results. Claude Code and Codex currently return `unknown` unless their harness catalog source reports authentication, so Meringue never claims their entries are authenticated from the model list alone.
+
 A failed or empty refresh never shrinks a working list. Without that rule one harness hiccup (a restart, a provider auth blip, a sleeping laptop) would replace a full catalog with an empty one, and the selector would silently fall back to the two or three references Meringue remembers from config and existing sessions — which looks exactly like discovery never worked.
 
 ### How Pi answers
 
-Pi exposes its catalog per process, not per session, so Meringue starts a short-lived ephemeral probe (`pi --mode rpc --no-session`), sends RPC `get_available_models`, and terminates it. The probe never touches a worker's RPC transport, writes no session file, and reuses the configured Pi `command`, `env`, and role args minus `--model`/`--thinking`. Claude Code and Codex use the same discovery boundary with their own short-lived commands; no network call is added to picker or setup rendering. See [`config.md`](config.md#model-catalogs-and-provider-resource-flags) for why those resource flags matter.
+Pi exposes its catalog per process, not per session, so Meringue starts a short-lived ephemeral probe (`pi --mode rpc --no-session`), sends RPC `get_available_models`, and terminates it. The probe never touches a worker's RPC transport, writes no session file, and reuses the configured Pi `command`, `env`, and role args minus `--model`/`--thinking`. When the RPC response omits authentication metadata, Meringue checks each listed provider through Pi's bounded `auth check --json --no-refresh` command. It keeps only the normalized status, source, and reason fields; credentials and raw output never enter state or head context. Claude Code and Codex use the same discovery boundary with their own short-lived commands; no network call is added to picker or setup rendering. See [`config.md`](config.md#model-catalogs-and-provider-resource-flags) for why those resource flags matter.
 
 Each model's thinking levels are derived with Pi's own rule (`getSupportedThinkingLevels`): a model without reasoning support reports `["off"]`, a level mapped to `null` is excluded, and `xhigh`/`max` appear only when the model explicitly maps them. Meringue keeps no hand-maintained model or level table.
 
@@ -258,6 +273,7 @@ The kernel owns catalog state. Snapshots live in `metadata.harness_model_catalog
 - Session reconciliation refreshes the active harness's snapshot when it is older than 10 minutes, and retries a failed or stale snapshot after 1 minute.
 - Cadence is measured from the last fetch *attempt* (`last_attempt_at`), not from `fetched_at`, so a retained list is retried on the failure cadence instead of being re-probed on every 2-second pass because its confirmed timestamp is old. Snapshots cap the normalized catalog at 2,000 entries and reject oversized references, so provider output cannot grow state without bound.
 - Refresh is silent: an expected "not fetched yet" state produces no durable log entries.
+- Head context exposes the active worker harness's cached snapshot as `active_harness_model_catalog`, including bounded references and authentication state without notes, errors, credentials, or transcripts. `GetModelCatalog` accepts optional `role: "head"` or `role: "worker"`; without a role it uses the active worker harness. A head can use the cached context before a same-turn `SpawnWorker`, or propose a refresh when the state is stale, unavailable, unsupported, or not fetched.
 - `/models refresh` forces an immediate re-fetch and reports `availability`, the model count, the confirmed timestamp, and the last failed attempt when there is one. `/models` alone opens the picker over the cached snapshot without starting a harness process; `Ctrl-R` in the picker submits the same refresh command.
 - The picker never renders an empty box. An unavailable catalog, an unsupported harness, a snapshot Meringue has never fetched, and a filter that matched nothing are four different sentences, each naming what to do next (`Ctrl-R`, or an exact `provider/model` id with `/model`).
 - Setup exposes each exact model value through the shared editor. `←` / `→` cycles the cached catalog for the selected role's harness when one exists; a missing catalog never blocks setup because the current exact reference remains editable and validatable.
