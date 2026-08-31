@@ -106,6 +106,20 @@ module Meringue
               "available in [harness.pi.env] PATH, then restart Meringue."
       end
 
+      def bounded_turn_outcome(outcome)
+        return nil unless outcome.is_a?(Hash)
+
+        outcome.slice("state", "kind", "stop_reason", "turn_ended_at", "last_assistant_text").transform_values do |value|
+          value.is_a?(String) ? value.byteslice(0, 4_000).to_s.scrub : value
+        end.compact
+      end
+
+      def turn_outcome_signature(outcome)
+        return nil unless outcome.is_a?(Hash)
+
+        %w[state kind stop_reason turn_ended_at last_assistant_text].map { |key| outcome.fetch(key, nil).to_s }.join("|")
+      end
+
       def prompt_delivery_marker(delivery_id)
         value = delivery_id.to_s.strip
         return nil if value.empty?
