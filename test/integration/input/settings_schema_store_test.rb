@@ -337,6 +337,59 @@ class InputSettingsSchemaStoreTest < Minitest::Test
     end
   end
 
+  # Setup and startup have to agree on one schema. Config.reject_obsolete_settings!
+  # refuses to load a file containing any of these paths, so if a writer can still
+  # target one, setup writes configuration that startup then calls obsolete. A dead
+  # canonicalizer used to write harness.provider, harness.model, harness.pi.model,
+  # and both thinking_level paths for exactly that reason.
+  OBSOLETE_WRITE_TARGETS = [
+    %w[harness provider], %w[harness model], %w[harness thinking_level],
+    %w[harness pi model], %w[harness pi thinking_level], %w[harness pi head_model],
+    %w[harness pi worker_model], %w[harness pi head_thinking_level],
+    %w[harness pi worker_thinking_level], %w[tui color_scheme]
+  ].freeze
+
+  def test_no_schema_owned_write_target_is_a_path_startup_rejects
+    owned = Meringue::Config::Schema.definitions.flat_map do |definition|
+      [definition.path, *definition.aliases]
+    end.compact
+
+    OBSOLETE_WRITE_TARGETS.each do |path|
+      refute_includes owned, path,
+                      "#{path.join(".")} is rejected at startup but is still a schema-owned write target"
+    end
+  end
+
+  # The guard above only covers paths the schema names. This one covers the writers
+  # themselves: whatever the store persists for every editable setting must survive a
+  # real load, so no writer can reintroduce a file startup refuses to open.
+  def test_every_editable_setting_the_store_writes_still_loads_at_startup
+    with_paths do |config_path, _state_path|
+      store = Meringue::Config::Store.new(path: config_path)
+      Meringue::Config::Schema.definitions.each do |definition|
+        next if definition.path.nil? || definition.type == "action"
+        next if %w[internal read_only].include?(definition.visibility)
+
+        config = Meringue::Config.load(path: config_path)
+        value = Meringue::Config::Schema.fetch(definition.id).effective_value(config, env: {})
+        next if value.nil?
+
+        begin
+          store.save(base_fingerprint: store.fingerprint, changes: { definition.id => value })
+        rescue Meringue::Config::Store::ValidationError
+          next
+        end
+      end
+
+      # Raises ParseError if any write above landed on an obsolete path.
+      Meringue::Config.load(path: config_path)
+
+      Meringue::Config.reject_obsolete_settings!(
+        Meringue::Config.load(path: config_path).to_file_h, path: config_path
+      )
+    end
+  end
+
   private
 
   def empty_config
