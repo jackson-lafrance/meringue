@@ -106,9 +106,13 @@ module Meringue
       DEFAULT_MODEL = "anthropic/claude-opus-5"
       # The highest reasoning level; Claude Opus 5 supports only xhigh and max.
       DEFAULT_THINKING_LEVEL = "max"
+      # Extensions are how Pi registers providers (Shopify's proxy provider is
+      # extension-registered), so disabling them drops every non-builtin model
+      # from the catalog and makes `--model` unresolvable on proxy setups. Tools,
+      # skills, prompt templates, and approvals stay pinned so a head/worker
+      # still runs unattended with a bounded toolset.
       DEFAULT_PI_HEAD_EXTRA_ARGS = [
         "--tools", "read,bash,grep,find,ls",
-        "--no-extensions",
         "--no-skills",
         "--no-prompt-templates",
         "--no-context-files",
@@ -116,7 +120,6 @@ module Meringue
       ].freeze
       DEFAULT_PI_WORKER_EXTRA_ARGS = [
         "--tools", "read,bash,grep,find,ls,edit,write",
-        "--no-extensions",
         "--no-skills",
         "--no-prompt-templates",
         "--no-context-files",

@@ -139,6 +139,106 @@ class KernelCoreOnboardingMarkerTest < Minitest::Test
     assert_equal "completed", saved_config.onboarding_outcome
   end
 
+  # The default model for future sessions comes from the harness's own catalog,
+  # not a hardcoded reference. A user who accepted the setup defaults still has
+  # the fallback model saved, so completing setup replaces it with the first
+  # model the harness actually reports.
+  def test_completing_setup_replaces_the_fallback_model_with_the_first_catalog_model
+    baseline = Meringue::Config::Store.new(path: config_path).fingerprint
+    apply_command(
+      "SaveConfiguration",
+      "base_fingerprint" => baseline,
+      "changes" => {
+        "agent.head_harness" => "pi",
+        "agent.worker_harness" => "pi",
+        "agent.head_model" => Meringue::Harness::Registry::DEFAULT_MODEL,
+        "agent.worker_model" => Meringue::Harness::Registry::DEFAULT_MODEL
+      },
+      "onboarding_outcome" => nil
+    )
+
+    rebuild_engine_with_catalog(
+      Meringue::Harness::ModelCatalog.available(
+        harness: "pi",
+        models: [
+          { "provider" => "fireworks-300k", "id" => "fireworks:accounts/fireworks/routers/glm-5p2-fast",
+            "name" => "GLM 5.2 Fast", "thinking_levels" => %w[off low high], "reasoning" => true },
+          { "provider" => "anthropic", "id" => "claude-opus-5",
+            "name" => "Claude Opus 5", "thinking_levels" => %w[off low high xhigh max], "reasoning" => true }
+        ],
+        source: "test_catalog_source"
+      )
+    )
+
+    result = apply_command("CompleteOnboarding", "outcome" => "completed")
+
+    assert_accepted(result)
+    assert_equal "fireworks-300k/fireworks:accounts/fireworks/routers/glm-5p2-fast",
+                 saved_config.setting("agent.head_model", env: {})
+    assert_equal "fireworks-300k/fireworks:accounts/fireworks/routers/glm-5p2-fast",
+                 saved_config.setting("agent.worker_model", env: {})
+    assert_includes result.fetch("message"),
+                    "default model set to fireworks-300k/fireworks:accounts/fireworks/routers/glm-5p2-fast"
+  end
+
+  # A user who picked a model in setup already saved something other than the
+  # fallback for at least one role, so completing setup leaves that choice alone.
+  def test_completing_setup_keeps_an_explicitly_chosen_model_over_the_catalog_default
+    baseline = Meringue::Config::Store.new(path: config_path).fingerprint
+    apply_command(
+      "SaveConfiguration",
+      "base_fingerprint" => baseline,
+      "changes" => {
+        "agent.head_harness" => "pi",
+        "agent.worker_harness" => "pi",
+        "agent.head_model" => "anthropic/claude-opus-5",
+        "agent.worker_model" => "openai/gpt-5.6-sol"
+      },
+      "onboarding_outcome" => nil
+    )
+
+    rebuild_engine_with_catalog(
+      Meringue::Harness::ModelCatalog.available(
+        harness: "pi",
+        models: [
+          { "provider" => "fireworks-300k", "id" => "fireworks:accounts/fireworks/routers/glm-5p2-fast",
+            "name" => "GLM 5.2 Fast", "thinking_levels" => %w[off low high], "reasoning" => true }
+        ],
+        source: "test_catalog_source"
+      )
+    )
+
+    apply_command("CompleteOnboarding", "outcome" => "completed")
+
+    assert_equal "anthropic/claude-opus-5", saved_config.setting("agent.head_model", env: {})
+    assert_equal "openai/gpt-5.6-sol", saved_config.setting("agent.worker_model", env: {})
+  end
+
+  # Skipping setup does not touch the model default, even when a catalog is
+  # available.
+  def test_skipping_setup_leaves_the_fallback_model_in_place
+    rebuild_engine_with_catalog(
+      Meringue::Harness::ModelCatalog.available(
+        harness: "pi",
+        models: [
+          { "provider" => "fireworks-300k", "id" => "fireworks:accounts/fireworks/routers/glm-5p2-fast",
+            "name" => "GLM 5.2 Fast", "thinking_levels" => %w[off low high], "reasoning" => true }
+        ],
+        source: "test_catalog_source"
+      )
+    )
+
+    apply_command("CompleteOnboarding", "outcome" => "skipped")
+
+    assert_equal Meringue::Harness::Registry::DEFAULT_MODEL, saved_config.setting("agent.head_model", env: {})
+  end
+
+  def rebuild_engine_with_catalog(catalog)
+    @engine = build_engine(
+      model_catalog_provider: ->(_provider) { catalog.to_h }
+    )
+  end
+
   # It is UI lifecycle: a head cannot know whether a human ever saw the flow.
   def test_the_marker_command_is_not_head_proposable
     refute_includes Meringue::Kernel::Engine::HEAD_PROPOSABLE_COMMANDS, "CompleteOnboarding"

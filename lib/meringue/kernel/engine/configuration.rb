@@ -363,9 +363,16 @@ module Meringue
         version = Config::ONBOARDING_VERSION
         Config.save_onboarding!(outcome: outcome, version: version, path: config_path)
 
+        resolved_model = outcome == "completed" ? resolve_default_model_from_catalog : nil
+        if resolved_model
+          Config.save_agent_session_defaults!(model: resolved_model, path: config_path)
+        end
+
         state = normalized_state
         message = if outcome == "skipped"
                     "Skipped first-run setup. It will not open again; run /setup any time."
+                  elsif resolved_model
+                    "Completed first-run setup; default model set to #{resolved_model}."
                   else
                     "Completed first-run setup."
                   end
@@ -390,6 +397,38 @@ module Meringue
         )
       rescue Config::ParseError => e
         rejected_result(command_id, command_type, "First-run setup was not recorded because config could not be read.", [e.message])
+      end
+
+      # The default model for future sessions is the first model the configured
+      # harness actually reports, not a hardcoded reference. A user who picked a
+      # model in setup already saved something other than the fallback for at
+      # least one role, so this only replaces the untouched fallback when both
+      # roles still hold it. Returns nil when no harness is configured or its
+      # catalog is unavailable, leaving the fallback in place.
+      def resolve_default_model_from_catalog
+        config = Config.load(path: config_path)
+        registry = Meringue::Harness::Registry.new(config: config)
+        head_provider = registry.head_provider.to_s
+        worker_provider = registry.worker_provider.to_s
+        provider = worker_provider.empty? ? head_provider : worker_provider
+        return nil if provider.to_s.empty?
+
+        defaults = registry.session_defaults(provider: provider)
+        roles = defaults.is_a?(Hash) ? defaults.fetch("roles", {}) : {}
+        head_model = roles.dig("head", "model")
+        worker_model = roles.dig("worker", "model")
+        fallback = Meringue::Harness::Registry::DEFAULT_MODEL
+        return nil if head_model != fallback || worker_model != fallback
+
+        catalog = Meringue::Harness::ModelCatalog.coerce(
+          refresh_model_catalog!(provider: provider),
+          harness: Meringue::Harness::Registry.public_provider_name(provider)
+        )
+        return nil unless catalog.usable?
+
+        catalog.references.first
+      rescue StandardError
+        nil
       end
 
       def set_harness(command_id, command_type, payload)
