@@ -61,7 +61,7 @@ class TuiKeybindingsTest < Minitest::Test
     assert @keys.match?("copy_selection", "\u0003")
 
     # Arrow keys are shared between scroll, cursor, suggestion, and tree
-    # navigation actions.
+    # navigation actions. Tab remains a focus key when no suggestion list is open.
     %w[scroll_up cursor_up suggestion_previous agent_select_previous].each do |action|
       assert @keys.match?(action, "\e[A"), "#{action} should accept the up arrow"
     end
@@ -170,6 +170,7 @@ class TuiKeybindingsTest < Minitest::Test
     assert_includes documentation, "`Ctrl-D`: quit."
     assert_includes documentation, "`Ctrl-B`"
     assert_includes documentation, "`Shift-Tab`"
+    assert_includes documentation, "cycle forward through the visible suggestions"
     assert_includes documentation, "`Ctrl-Z`: undo the most recent composer edit"
     assert_includes documentation, "`Ctrl-Y`: redo the most recently undone composer edit"
     assert_includes documentation, "`Ctrl-C`: clear the composer when it contains text; quit the application when it is empty."

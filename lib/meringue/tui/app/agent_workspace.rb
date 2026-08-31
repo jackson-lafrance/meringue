@@ -25,7 +25,7 @@ module Meringue
         end
         return [input_buffer, input_cursor, slash_suggestion_index] if remainder.nil?
 
-        focus_result = handle_focus_key(remainder, input_buffer, input_cursor, slash_suggestion_index)
+        focus_result = handle_focus_key(remainder, input_buffer, input_cursor, slash_suggestion_index, state)
         return focus_result if focus_result
         return nil unless @focused_pane == "logs"
 

@@ -92,7 +92,7 @@ module Meringue
         "submit" => "Submit / open selected item",
         "rename_selected" => "Rename the selected project or issue",
         "newline" => "Insert newline",
-        "complete_suggestion" => "Complete slash suggestion",
+        "complete_suggestion" => "Complete focused composer suggestion",
         "suggestion_previous" => "Previous slash suggestion",
         "suggestion_next" => "Next slash suggestion",
         "cursor_left" => "Cursor left",

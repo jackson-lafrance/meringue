@@ -230,7 +230,7 @@ class TuiAppWiringTest < Minitest::Test
     assert_equal ["abc", 2, -1], @app.send(:handle_key, "\e[D", "abc", 3, -1, nil, state)
     assert_equal ["pasted", 6, -1], @app.send(:handle_key, { "type" => "paste", "text" => "pasted" }, "", 0, -1, nil, state)
     assert_equal ["", 0, -1], @app.send(:handle_key, "\u0003", "clear me", 8, -1, nil, state)
-    assert_equal ["/help", 5, -1], @app.send(:handle_key, "\t", "/hel", 4, -1, nil, state)
+    assert_equal ["/hel", 4, 0], @app.send(:handle_key, "\t", "/hel", 4, -1, nil, state)
     assert_equal ["a\nb", 2, -1], @app.send(:handle_key, "\e[13;2u", "ab", 1, -1, nil, state)
   end
 
