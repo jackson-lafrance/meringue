@@ -144,20 +144,35 @@ module Meringue
           next unless claim.fetch("claimed", false)
 
           source = claim.fetch("worker")
+          attempt = claim.fetch("attempt")
           recovery_id = claim.fetch("command_id")
-          payload = {
+          marker = { "source_worker_id" => source.fetch("id"), "attempt" => attempt }
+          continuation_payload = {
             "issue_id" => source.fetch("issue_id"),
             "title" => Experiments::SelfFixingWorkers.title(source),
-            "prompt" => Experiments::SelfFixingWorkers.prompt(source),
+            "prompt" => Experiments::SelfFixingWorkers.continuation_prompt(source),
             "follow_up_of_agent_id" => source.fetch("id"),
-            "_self_fixing_recovery" => {
-              "source_worker_id" => source.fetch("id"),
-              "attempt" => claim.fetch("attempt")
-            }
+            "_self_fixing_recovery" => marker.merge("lane" => "continuation")
           }
-          result = @worker_spawn_mutex.synchronize { spawn_worker(recovery_id, "SpawnWorker", payload) }
-          result = record_self_fixing_outcome(source.fetch("id"), result, claim.fetch("attempt"), recovery_id)
-          result.merge("self_fixing_source_worker_id" => source.fetch("id"), "self_fixing_attempt" => claim.fetch("attempt"))
+          continuation = @worker_spawn_mutex.synchronize { spawn_worker(recovery_id, "SpawnWorker", continuation_payload) }
+          continuation = record_self_fixing_outcome(source.fetch("id"), continuation, attempt, recovery_id)
+          results = [continuation.merge("self_fixing_lane" => "continuation", "self_fixing_source_worker_id" => source.fetch("id"), "self_fixing_attempt" => attempt)]
+
+          if Experiments::SelfFixingWorkers.repair_lane?(source)
+            repair_id = "self-fix:#{source.fetch("id")}:#{attempt}:repair"
+            repair = Experiments::SelfFixingWorkers.classification(source)
+            repair_payload = {
+              "issue_id" => repair.fetch("repair_issue_id"),
+              "title" => "Repair recovery platform defect",
+              "prompt" => Experiments::SelfFixingWorkers.repair_prompt(source),
+              "share_workspace" => false,
+              "_self_fixing_recovery" => marker.merge("lane" => "repair")
+            }
+            repair_result = @worker_spawn_mutex.synchronize { spawn_worker(repair_id, "SpawnWorker", repair_payload) }
+            record_self_fixing_lane_outcome(source.fetch("id"), "repair", repair_result, attempt, repair_id)
+            results << repair_result.merge("self_fixing_lane" => "repair", "self_fixing_source_worker_id" => source.fetch("id"), "self_fixing_attempt" => attempt)
+          end
+          results
         rescue StandardError => e
           failure = failed_result(
             recovery_id,
@@ -166,8 +181,8 @@ module Meringue
             [e.class.name, sanitized_error_message(e)]
           )
           record_self_fixing_outcome(candidate.fetch("id"), failure, claim && claim.fetch("attempt", 1), recovery_id)
-          failure.merge("self_fixing_source_worker_id" => candidate.fetch("id"))
-        end
+          [failure.merge("self_fixing_lane" => "continuation", "self_fixing_source_worker_id" => candidate.fetch("id"))]
+        end.flatten
       end
 
       def claim_self_fixing_worker(worker_id)
@@ -193,6 +208,29 @@ module Meringue
           touch_state!(state, now)
           store.save(state)
           { "claimed" => true, "worker" => deep_copy(worker), "attempt" => attempt, "command_id" => command_id }
+        end
+      end
+
+      def record_self_fixing_lane_outcome(source_worker_id, lane, result, attempt, command_id)
+        synchronized_state do
+          state = normalized_state
+          source = find_agent(state, source_worker_id)
+          return result unless source
+          metadata = source.fetch("harness_metadata", {}) || {}
+          recovery = Experiments::SelfFixingWorkers.recovery_record(source)
+          lanes = recovery.fetch("lanes", {})
+          lanes = {} unless lanes.is_a?(Hash)
+          lanes[lane] = {
+            "state" => result.fetch("status", nil) == "accepted" ? "spawned" : "failed",
+            "attempts" => attempt.to_i, "command_id" => command_id,
+            "recovery_worker_id" => result.fetch("target_id", nil), "completed_at" => timestamp
+          }.compact
+          recovery["lanes"] = lanes
+          source["harness_metadata"] = metadata.merge("self_fixing_recovery" => recovery)
+          source["updated_at"] = timestamp
+          touch_state!(state, source.fetch("updated_at"))
+          store.save(state)
+          result
         end
       end
 
