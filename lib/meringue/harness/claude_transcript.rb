@@ -89,7 +89,7 @@ module Meringue
           {
             "state" => "completed",
             "stop_reason" => reason,
-            "last_assistant_text" => truncate(text, 2_000),
+            "last_assistant_text" => text,
             "ended_at" => ended_at
           }.compact
         end

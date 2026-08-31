@@ -109,9 +109,13 @@ module Meringue
       def bounded_turn_outcome(outcome)
         return nil unless outcome.is_a?(Hash)
 
-        outcome.slice("state", "kind", "stop_reason", "turn_ended_at", "last_assistant_text").transform_values do |value|
-          value.is_a?(String) ? value.byteslice(0, 4_000).to_s.scrub : value
-        end.compact
+        bounded = outcome.slice("state", "kind", "stop_reason", "turn_ended_at", "last_assistant_text")
+        # Final reports are durable handover data, not diagnostics. Keep the complete text here;
+        # truncating it caused focused-worker completions to persist an unlabelled mid-word report.
+        bounded.each do |key, value|
+          bounded[key] = value.byteslice(0, 4_000).to_s.scrub if key != "last_assistant_text" && value.is_a?(String)
+        end
+        bounded.compact
       end
 
       def turn_outcome_signature(outcome)

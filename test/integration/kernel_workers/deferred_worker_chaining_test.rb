@@ -153,6 +153,8 @@ class KernelWorkersDeferredChainingTest < Minitest::Test
     engine.mark_worker_completed(agent_id: predecessor_id, last_assistant_text: complete_report)
 
     spawn_prompt = @harness_client.spawns.last.fetch("prompt")
+    assert_operator complete_report.bytesize, :>, 4_000
+    assert_equal complete_report, agent(engine, predecessor_id).dig("harness_metadata", "last_assistant_text")
     assert_includes spawn_prompt, complete_report
     assert_includes spawn_prompt, "REPORT END"
     refute_includes spawn_prompt, "[handover truncated]"
