@@ -195,11 +195,19 @@ module Meringue
           FirstRun.empty_logs_lines(state, wrap: ->(text) { wrap_text_line(text, width && [width.to_i, 1].max) })
         end
 
-        def delivery_pr_hint_segments(state)
+        # `include_open_summary:` decides whether the unscoped state falls back to
+        # the all-open-PR count. The composed status bar places that count as its
+        # own `open_pull_requests` component, so the `context` component must ask
+        # for the scoped answer only; otherwise both emit the same label and the
+        # bar reads "1 open PR · 1 open PR". The legacy combined hint line is the
+        # one caller that still owns the fallback itself.
+        def delivery_pr_hint_segments(state, include_open_summary: true)
           return [] unless Settings.github_enabled?(state)
 
           scoped_id = DeliveryPullRequest.scoped_id(state)
-          return open_pull_requests_hint_segments(state) if scoped_id.empty?
+          if scoped_id.empty?
+            return include_open_summary ? open_pull_requests_hint_segments(state) : []
+          end
 
           presentation = DeliveryPullRequest.for_id(state, scoped_id)
           return scoped_delivery_pr_segments(presentation) if DeliveryPullRequest.openable?(presentation)

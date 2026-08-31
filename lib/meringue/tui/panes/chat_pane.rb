@@ -415,7 +415,9 @@ module Meringue
         # The worker/head counts that the old combined hint line also carried are
         # deliberately absent, because the `workers` and `heads` components
         # render them; including them here would print each count twice whenever
-        # both are placed.
+        # both are placed. The all-open-PR count is absent for the same reason:
+        # the `open_pull_requests` component owns it, so the delivery-PR hint is
+        # asked for the scoped answer only.
         #
         # With nothing selected and nothing pending there is no context to state,
         # so the idle dashboard falls back to the standing discovery hints. A
@@ -427,7 +429,7 @@ module Meringue
           segments = join_context_segments(segments, selection_hint_segments(state))
           open_questions = state.fetch("questions", []).count { |question| question["status"] == "open" }
           segments = join_context_segments(segments, [["? #{open_questions}", Style::WARNING]]) if open_questions.positive?
-          segments = join_context_segments(segments, delivery_pr_hint_segments(state))
+          segments = join_context_segments(segments, delivery_pr_hint_segments(state, include_open_summary: false))
           return segments unless segments.empty?
           return [] if slash_prompt?(chat.fetch("input_buffer", ""))
 
