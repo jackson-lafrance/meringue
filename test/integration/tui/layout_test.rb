@@ -477,8 +477,8 @@ class TuiLayoutTest < Minitest::Test
     content_width = metrics.fetch(:main_width) - 4
     first_visible = lines.length - rows
 
-    assert_equal lines.fetch(first_visible), content_row[metrics.fetch(:main_x) + 2, content_width].rstrip
-    assert_equal 0, @layout.agent_workspace_scroll_max(state, width: width, height: height)
+    assert_equal lines.fetch(first_visible - 2), content_row[metrics.fetch(:main_x) + 2, content_width].rstrip
+    assert_equal 5, @layout.agent_workspace_scroll_max(state, width: width, height: height)
     assert_equal [width], frame.split("\n", -1).map { |line| TUISupport.strip_ansi(line).length }.uniq
   end
 

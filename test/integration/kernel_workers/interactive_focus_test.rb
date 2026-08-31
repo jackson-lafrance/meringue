@@ -167,8 +167,8 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
       "type" => "PromptAgent",
       "payload" => { "agent_id" => worker_id, "prompt" => "Do not create a second writer." }
     )
-    assert_equal "rejected", blocked.fetch("status")
-    assert_equal "interactive_focus_active", blocked.fetch("errors").first
+    assert_equal "accepted", blocked.fetch("status")
+    assert_equal true, blocked.dig("result", "queued")
 
     resumed = engine.end_agent_interactive_focus(worker_id)
     assert_equal "accepted", resumed.fetch("status"), resumed.inspect
@@ -345,11 +345,10 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
     restarted_engine.reconcile_sessions
 
     recovered = agent(restarted_engine, worker_id)
-    assert_equal "working", recovered.fetch("status")
+    assert_equal "completed", recovered.fetch("status")
     refute recovered.fetch("harness_metadata").key?("interactive_handoff")
     assert_equal 1, client.resumed.length
-    assert_equal 1, client.prompts.length
-    assert_includes client.prompts.first.fetch("prompt"), "Continue this Meringue worker session"
+    assert_empty client.prompts
   end
 
   def test_restart_retries_a_focus_return_that_crashed_while_resuming

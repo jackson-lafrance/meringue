@@ -202,6 +202,11 @@ module Meringue
       # jump-mode exit first. Hovering something that cannot scroll falls back to
       # the focused pane, which is the older behavior.
       def handle_mouse_wheel_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+        if @agent_workspace_active && pane_at_mouse_position(key, state) == "agent_workspace"
+          scroll_agent_workspace(key, state)
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
         if embedded_agent_workspace? && pane_at_mouse_position(key, state) == "logs"
           if agent_workspace_scroll_max(state).positive?
             scroll_agent_workspace(key, state)

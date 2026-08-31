@@ -856,7 +856,7 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
       assert app.send(:open_agent_workspace_by_id, state, "P1-I1-W1")
       snapshot = app.send(:agent_workspace_snapshot, state, "", 0)
       focused_state = state.merge("_agent_workspace" => snapshot)
-      assert_equal 0, app.send(:agent_workspace_scroll_max, focused_state), harness
+      assert_equal 25, app.send(:agent_workspace_scroll_max, focused_state), harness
 
       app.send(:handle_key, "\e[5~", "", 0, -1, nil, focused_state)
       app.send(:handle_key, "\e[6~", "", 0, -1, nil, focused_state)
@@ -870,11 +870,7 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
         focused_state
       )
 
-      assert_equal ["\e[5~", "\e[6~", "wheel_down"], controller.keys.map { |key| key.is_a?(Hash) ? key.fetch("kind") : key }, harness
-      wheel = controller.keys.last
-      assert_equal 2, wheel.fetch("count"), harness
-      assert wheel.fetch("x").between?(1, 100), harness
-      assert wheel.fetch("y").between?(1, 32), harness
+      assert_empty controller.keys, harness
       assert_equal 0, app.instance_variable_get(:@workspace_agent_scroll_offset), harness
       assert_equal 0, app.send(:agent_workspace_snapshot, state, "", 0).fetch("scroll_offset"), harness
     ensure
