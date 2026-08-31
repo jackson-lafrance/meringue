@@ -30,6 +30,22 @@ class TuiTerminalTest < Minitest::Test
     assert_includes output.string, "\e[1;1H"
   end
 
+  def test_partial_rows_update_the_next_full_frame_diff_baseline
+    output = StringIO.new
+    terminal = interactive_terminal(output)
+    terminal.write_frame("abc\n123\nxyz")
+    output.string.clear
+
+    terminal.write_frame_rows("456", row: 1)
+
+    assert_includes output.string, "\e[2;1H456"
+    output.string.clear
+    terminal.write_frame("abc\n456\nXYZ")
+
+    refute_includes output.string, "\e[2;1H", "the patched row must not be rewritten"
+    assert_includes output.string, "\e[3;1HXYZ"
+  end
+
   def test_streaming_mixed_styled_frames_do_not_clear_at_representative_sizes
     [[64, 18], [100, 32], [160, 40]].each do |width, height|
       output = StringIO.new

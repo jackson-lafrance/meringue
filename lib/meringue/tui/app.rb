@@ -331,34 +331,41 @@ module Meringue
         terminal.with_screen do
           terminal.raw do
             last_frame = nil
+            current_state = nil
+            next_full_render_at = 0.0
+            rendered_dimensions = nil
 
             loop do
               width, height = terminal.dimensions
               @last_render_width = width
               @last_render_height = height
               now = monotonic_time
-              # The orchestration snapshot is read-only presentation input. Keep it
-              # independent from the composer and other transient state so a burst
-              # of typing does not parse the whole Store snapshot per character.
-              # Refreshing on the dashboard cadence still observes this process's
-              # saves and atomic writes from other Store instances promptly.
-              base_state = read_only_base_state(state_provider, now: now)
-              current_state = compose_state(-> { base_state }, input_buffer, slash_suggestion_index, input_cursor)
-              frame = render(current_state, width: width, height: height, color: color_output?)
-              if @force_full_redraw
-                terminal.invalidate_frame! if terminal.respond_to?(:invalidate_frame!)
-                last_frame = nil
-                @force_full_redraw = false
-              end
-              if frame != last_frame
-                terminal.write_frame(frame)
-                last_frame = frame
+              if current_state.nil? || now >= next_full_render_at || rendered_dimensions != [width, height]
+                # The orchestration snapshot is read-only presentation input. Keep it
+                # independent from the composer and other transient state so a burst
+                # of typing does not parse the whole Store snapshot per character.
+                base_state = read_only_base_state(state_provider, now: now)
+                current_state = compose_state(-> { base_state }, input_buffer, slash_suggestion_index, input_cursor)
+                frame = render(current_state, width: width, height: height, color: color_output?)
+                if @force_full_redraw
+                  terminal.invalidate_frame! if terminal.respond_to?(:invalidate_frame!)
+                  last_frame = nil
+                  @force_full_redraw = false
+                end
+                if frame != last_frame
+                  terminal.write_frame(frame)
+                  last_frame = frame
+                end
+                rendered_dimensions = [width, height]
+                next_full_render_at = now + frame_refresh_interval(current_state)
               end
 
               flush_deferred_agent_workspace_persistence
-              key = terminal.read_key(timeout: frame_refresh_interval(current_state))
+              timeout = [next_full_render_at - monotonic_time, 0.0].max
+              key = terminal.read_key(timeout: timeout)
               break if quit_key?(key, input_buffer)
 
+              previous_input = [input_buffer, input_cursor, slash_suggestion_index]
               input_buffer, input_cursor, slash_suggestion_index = handle_key_safely(
                 key,
                 input_buffer,
@@ -368,6 +375,33 @@ module Meringue
                 current_state
               )
               break if @quit_requested || reload_requested?
+
+              changed_input = previous_input != [input_buffer, input_cursor, slash_suggestion_index]
+              input_state = input_surface_state(current_state, input_buffer, input_cursor, slash_suggestion_index)
+              patch = if key && changed_input && input_surface_edit_key?(key)
+                        layout.render_input_surface(
+                          current_state,
+                          input_state,
+                          width: width,
+                          height: height,
+                          color: color_output?
+                        )
+                      end
+              if patch && terminal.respond_to?(:write_frame_rows)
+                terminal.write_frame_rows(patch.fetch(:frame), row: patch.fetch(:row))
+                last_frame = replace_frame_rows(last_frame, patch.fetch(:frame), row: patch.fetch(:row))
+                current_state = input_state
+              elsif key.nil?
+                current_state = nil
+              elsif forwarded_agent_workspace_input?
+                # The managed session owns this input surface. Poll it on its
+                # existing 40 Hz cadence instead of rebuilding after every byte.
+                current_state = input_state
+              else
+                # Commands, popups, submits, resizes, and multiline geometry
+                # changes need the complete state and layout on the next pass.
+                current_state = nil
+              end
             end
           end
         end
@@ -382,6 +416,60 @@ module Meringue
       private
 
       attr_reader :layout, :out, :terminal, :session_opener, :pull_request_opener, :workspace_controller, :agent_session_service, :log_store, :keybindings, :config, :lifecycle
+
+      # Reuses the last composed snapshot and changes only input-owned fields.
+      # This keeps transcript arrays, logs, and the orchestration state shared
+      # across a typing burst instead of copying or reconciling them per byte.
+      def input_surface_state(state, input_buffer, input_cursor, slash_suggestion_index)
+        cursor = clamp_cursor(input_buffer, input_cursor)
+        workspace = state.fetch("_agent_workspace", {}) || {}
+        if workspace.fetch("active", false) && !workspace.fetch("embedded", false)
+          @workspace_draft = input_buffer.to_s
+          return state.merge(
+            "_agent_workspace" => workspace.merge(
+              "input_buffer" => input_buffer,
+              "input_cursor" => cursor,
+              "slash_suggestion_index" => slash_suggestion_index.to_i,
+              "slash_suggestions" => workspace_command_suggestion_records(input_buffer)
+            )
+          )
+        end
+
+        chat = state.fetch("_chat", {}) || {}
+        state.merge(
+          "_chat" => chat.merge(
+            "input_buffer" => input_buffer,
+            "input_cursor" => cursor,
+            "slash_suggestion_index" => slash_suggestion_index
+          )
+        )
+      end
+
+      def input_surface_edit_key?(key)
+        return true if paste_key?(key) || plain_text_paste_key?(key) || printable_key?(key)
+        return true if dashboard_chat_undo_key?(key) || dashboard_chat_redo_key?(key)
+
+        %w[
+          newline delete_backward delete_forward delete_word_backward delete_word_forward
+          cursor_left cursor_right cursor_up cursor_down cursor_home cursor_end
+          cursor_word_left cursor_word_right
+        ].any? { |action| keybinding?(action, key) }
+      end
+
+      def forwarded_agent_workspace_input?
+        embedded_agent_workspace? && @focused_pane == "logs"
+      end
+
+      def replace_frame_rows(frame, replacement, row:)
+        return frame unless frame
+
+        lines = frame.lines(chomp: true)
+        replacement_lines = replacement.to_s.lines(chomp: true)
+        return frame if row.to_i.negative? || row.to_i + replacement_lines.length > lines.length
+
+        lines[row.to_i, replacement_lines.length] = replacement_lines
+        lines.join("\n")
+      end
 
       def handle_key_safely(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
         handle_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)

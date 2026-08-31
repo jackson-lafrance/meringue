@@ -144,6 +144,24 @@ module Meringue
         output.flush
       end
 
+      # Writes complete terminal rows and folds them into the diff baseline.
+      # Input surfaces span the viewport width, so row replacement never needs
+      # to splice ANSI-styled cells or repaint an unchanged pane.
+      def write_frame_rows(frame, row:)
+        return write_frame(frame) unless interactive? && @last_frame
+
+        lines = frame.to_s.lines(chomp: true)
+        lines.each_with_index do |line, index|
+          output.write("\e[#{row.to_i + index + 1};1H")
+          output.write(line)
+          output.write(CLEAR_LINE)
+        end
+        previous_lines = @last_frame.lines(chomp: true)
+        previous_lines[row.to_i, lines.length] = lines
+        @last_frame = previous_lines.join("\n")
+        output.flush
+      end
+
       # A major layout transition (dashboard ↔ focused workspace) changes
       # nearly every row. Discarding the diff baseline lets the next frame be
       # written as one clear/full-frame update instead of visible row patches.

@@ -156,6 +156,50 @@ module Meringue
         canvas.render(color: color)
       end
 
+      # Ordinary edits only change the full-width composer at the bottom of the
+      # dashboard or focused workspace. Render those rows without touching the
+      # transcript, AgentTree, Markdown layout, or any other pane. A structural
+      # change returns nil so the app falls back to the normal full render.
+      def render_input_surface(previous_state, state, width:, height:, color: false)
+        previous_geometry = input_surface_geometry(previous_state, width, height)
+        geometry = input_surface_geometry(state, width, height)
+        return nil unless geometry && geometry == previous_geometry
+
+        canvas = Canvas.new(width: geometry.fetch(:screen_width), height: geometry.fetch(:height))
+        if geometry.fetch(:surface) == :workspace
+          draw_pane(
+            canvas,
+            geometry.fetch(:x),
+            0,
+            geometry.fetch(:width),
+            geometry.fetch(:height),
+            "chat",
+            agent_workspace_pane.composer_lines(state, width: geometry.fetch(:content_width)),
+            active: true,
+            overflow: :tail
+          )
+        else
+          active = scroll_pane_active?(state, "chat")
+          composer_lines = chat_pane.composer_lines(state, width: geometry.fetch(:content_width))
+          draw_pane(
+            canvas,
+            geometry.fetch(:x),
+            0,
+            geometry.fetch(:width),
+            geometry.fetch(:height),
+            composer_pane_title(state),
+            composer_lines,
+            active: active,
+            overflow: :tail,
+            scroll_offset: composer_viewport_offset(state, geometry.fetch(:metrics), composer_lines),
+            border_style: composer_border_style(state, active: active),
+            title_style: composer_title_style(state)
+          )
+        end
+
+        { row: geometry.fetch(:y), frame: canvas.render(color: color) }
+      end
+
       CONTEXT_MENU_STATE_KEY = "_context_menu"
 
       def context_menu_snapshot(state)

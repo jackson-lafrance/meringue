@@ -82,6 +82,7 @@ module ScalabilityBenchmark
       # now includes the production frame dimension/diff/row emission path.
       @terminal_output = StringIO.new
       @frame_writer = Meringue::TUI::Terminal.new(input: StringIO.new, output: @terminal_output)
+      @frame_writer.define_singleton_method(:interactive?) { true }
     end
 
     def interactive? = true
@@ -101,6 +102,7 @@ module ScalabilityBenchmark
       @sequence = request.fetch("sequence")
       if request["sync"]
         @on_sync&.call
+        @awaiting_full_frame = true
         # Store presentation refreshes on a bounded cadence. This unmeasured barrier
         # lets the next frame consume the final paused reconciliation snapshot.
         sleep 0.25
@@ -113,20 +115,31 @@ module ScalabilityBenchmark
     def write_frame(frame)
       @terminal_output.truncate(0)
       @terminal_output.rewind
-      @frame_writer.send(:write_interactive_frame, frame)
-      terminal_bytes = @terminal_output.string.bytesize
+      @frame_writer.write_frame(frame)
+      emit_frame_response(frame, terminal_bytes: @terminal_output.string.bytesize, full: true)
+      @awaiting_full_frame = false
+    end
 
-      # These markers are extracted from the bytes the child actually handed to the
-      # terminal. They are deliberately not read from Store, so visibility and scroll
-      # assertions cannot pass merely because the disk state changed behind the TUI.
-      revisions = frame.scan(/synthetic reconciliation (\d+)/).flatten.map(&:to_i)
+    def write_frame_rows(frame, row:)
+      @terminal_output.truncate(0)
+      @terminal_output.rewind
+      @frame_writer.write_frame_rows(frame, row: row)
+      return if @awaiting_full_frame
+
+      emit_frame_response(frame, terminal_bytes: @terminal_output.string.bytesize, full: false)
+    end
+
+    def emit_frame_response(frame, terminal_bytes:, full:)
+      # These markers come from bytes sent to the terminal, not from Store. A
+      # composer-row update acknowledges typing without claiming a state update.
+      revisions = full ? frame.scan(/synthetic reconciliation (\d+)/).flatten.map(&:to_i) : []
       rendered_revision = revisions.max
       @rendered_revisions << rendered_revision if rendered_revision
       sidebar_width = [[(WIDTH * 0.34).floor, Meringue::TUI::Layout::SIDEBAR_MIN_WIDTH].max,
                        Meringue::TUI::Layout::SIDEBAR_MAX_WIDTH, WIDTH - 36].min
       scroll_frame = frame.lines.map { |line| line[sidebar_width..].to_s }.join("\n")
       scroll_marker = Digest::SHA256.hexdigest(scroll_frame)
-      @rendered_scroll_markers << scroll_marker
+      @rendered_scroll_markers << scroll_marker if full
       @output.puts(JSON.generate(
         "type" => "frame", "sequence" => @sequence, "bytes" => frame.bytesize,
         "digest" => Digest::SHA256.hexdigest(frame), "typed_visible" => frame.include?(@typed),
