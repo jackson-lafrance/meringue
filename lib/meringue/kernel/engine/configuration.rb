@@ -485,15 +485,25 @@ module Meringue
         data["harness"]["head_provider"] = head_provider
         data["harness"]["worker_provider"] = worker_provider
         candidate = Config.new(data, path: current.path, loaded: current.loaded?, file_data: current.to_file_h)
-        registry = Meringue::Harness::Registry.new(config: candidate)
+        previous_registry = Meringue::Harness::Registry.new(config: current)
+        previous_providers = {
+          "head" => safely_configured_provider(previous_registry, "head"),
+          "worker" => safely_configured_provider(previous_registry, "worker")
+        }
         providers = { "head" => head_provider.to_s, "worker" => worker_provider.to_s }
+
+        # Resolve a changed role from the selected harness's own config, not from the
+        # harness-neutral values being replaced. Otherwise a valid-looking model reference
+        # (for example a Pi/Fireworks model) is copied into a harness that cannot use it.
+        defaults_data = Meringue::Config.deep_stringify(data)
+        defaults_data["harness"].delete_if { |key, _| Meringue::Harness::Registry::SESSION_DEFAULT_KEYS.include?(key.to_s) }
+        defaults_config = Config.new(defaults_data, path: current.path, loaded: current.loaded?, file_data: current.to_file_h)
+        defaults_registry = Meringue::Harness::Registry.new(config: defaults_config)
 
         values = providers.each_with_object({}) do |(role, provider), changes|
           defaults = begin
-            registry.session_defaults(provider: provider)
+            defaults_registry.session_defaults(provider: provider)
           rescue ArgumentError, Meringue::Harness::MissingProviderError
-            # A future harness may have no model/thinking argv contract. Preserve its neutral
-            # values rather than trying the same unsupported provider lookup a second time.
             nil
           end
           role_defaults = defaults&.fetch("roles", {})&.fetch(role, {}) || {}
@@ -501,12 +511,17 @@ module Meringue
           configured_thinking = candidate.setting("agent.#{role}_thinking", env: {})
           configured_model_source = Meringue::Config::Schema.fetch("agent.#{role}_model").source(candidate, env: {})
           configured_thinking_source = Meringue::Config::Schema.fetch("agent.#{role}_thinking").source(candidate, env: {})
-          model = if configured_model_source == "file" && Meringue::Harness::ModelReference.valid?(configured_model)
+          changed_harness = previous_providers[role].to_s != provider.to_s
+          model = if changed_harness
+                    role_defaults.fetch("model", Meringue::Harness::Registry::DEFAULT_MODEL)
+                  elsif configured_model_source == "file" && Meringue::Harness::ModelReference.valid?(configured_model)
                     configured_model
                   else
                     role_defaults.fetch("model", configured_model)
                   end
-          thinking = if configured_thinking_source == "file" && Meringue::Harness::Registry.thinking_levels_for(provider).include?(configured_thinking.to_s)
+          thinking = if changed_harness
+                       role_defaults.fetch("thinking_level", Meringue::Harness::Registry::DEFAULT_THINKING_LEVEL)
+                     elsif configured_thinking_source == "file" && Meringue::Harness::Registry.thinking_levels_for(provider).include?(configured_thinking.to_s)
                        configured_thinking
                      else
                        role_defaults.fetch("thinking_level", configured_thinking)
@@ -520,6 +535,12 @@ module Meringue
         values
       rescue Config::ParseError
         {}
+      end
+
+      def safely_configured_provider(registry, role)
+        role == "head" ? registry.head_provider : registry.worker_provider
+      rescue ArgumentError, Meringue::Harness::MissingProviderError
+        nil
       end
     end
   end

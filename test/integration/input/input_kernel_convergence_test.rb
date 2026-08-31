@@ -147,11 +147,45 @@ class InputKernelConvergenceTest < Minitest::Test
       saved = Meringue::Config.load(path: sandbox.config_path)
       assert_equal "claude", saved.setting("agent.head_harness", env: {})
       assert_equal "claude", saved.setting("agent.worker_harness", env: {})
-      assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", saved.setting("agent.head_model", env: {})
+      assert_equal "anthropic/claude-opus-5", saved.setting("agent.head_model", env: {})
+      assert_equal "anthropic/claude-opus-5", saved.setting("agent.worker_model", env: {})
       assert_equal "max", saved.setting("agent.head_thinking", env: {})
       assert_equal "max", saved.setting("agent.worker_thinking", env: {})
       assert_equal "max", sandbox.state.dig("metadata", "agent_session_defaults", "thinking_level")
       assert_empty sandbox.state.fetch("agents")
+    end
+  end
+
+  def test_role_specific_harness_switch_resolves_only_the_changed_role
+    input_sandbox do |sandbox|
+      sandbox.submit("/harness pi")
+      write_config(
+        sandbox.config_path,
+        <<~TOML
+          [experiments]
+          agent_defaults_mode = "role-specific"
+          [harness]
+          head_provider = "pi"
+          worker_provider = "pi"
+          head_model = "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast"
+          worker_model = "openai/gpt-5.6-sol"
+          head_thinking_level = "xhigh"
+          worker_thinking_level = "minimal"
+        TOML
+      )
+
+      result = sandbox.submit("/harness head codex")
+      assert_equal [%w[SetHarness accepted]], sandbox.command_result_pairs(result)
+
+      saved = Meringue::Config.load(path: sandbox.config_path)
+      assert_equal "codex", saved.setting("agent.head_harness", env: {})
+      assert_equal "pi", saved.setting("agent.worker_harness", env: {})
+      assert_equal "openai/gpt-5.6-sol", saved.setting("agent.head_model", env: {})
+      assert_equal "openai/gpt-5.6-sol", saved.setting("agent.worker_model", env: {})
+      assert_equal "max", saved.setting("agent.head_thinking", env: {})
+      assert_equal "minimal", saved.setting("agent.worker_thinking", env: {})
+      assert_equal "codex", sandbox.state.dig("metadata", "active_head_harness")
+      assert_equal "pi", sandbox.state.dig("metadata", "active_worker_harness")
     end
   end
 
