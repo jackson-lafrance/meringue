@@ -41,6 +41,54 @@ module Meringue
         end
       end
 
+      # A native interactive process stays alive at its prompt after its current turn finishes.
+      # Process liveness therefore cannot classify focused work. Ask the harness for a read-only
+      # outcome newer than the handoff checkpoint and settle it without taking PTY ownership.
+      def reconcile_active_interactive_focuses
+        candidates = synchronized_state do
+          normalized_state.fetch("agents").filter_map do |agent|
+            next unless agent.fetch("type", nil) == "worker"
+            next unless agent.fetch("status", nil) == "working"
+
+            marker = agent.dig("harness_metadata", "interactive_handoff")
+            next unless marker.is_a?(Hash) && marker.fetch("state", nil).to_s == "interactive"
+            next unless interactive_focus_owner_alive?(marker)
+
+            deep_copy(agent)
+          end
+        end
+
+        candidates.filter_map do |candidate|
+          client = harness_client_for_agent(candidate)
+          next unless client.respond_to?(:interactive_turn_outcome)
+
+          marker = candidate.dig("harness_metadata", "interactive_handoff") || {}
+          session_ref = agent_session_ref(candidate)
+          outcome = client.interactive_turn_outcome(session_ref, handoff: marker)
+          next unless outcome.is_a?(Hash)
+
+          failure = settle_failure_from_turn_outcome(stringify_keys(outcome))
+          settled_ref = session_ref.merge(
+            "is_streaming" => false,
+            "metadata" => (session_ref.fetch("metadata", {}) || {}).merge("turn_outcome" => outcome)
+          )
+          mark_worker_completed(
+            agent_id: candidate.fetch("id"),
+            last_assistant_text: outcome.fetch("last_assistant_text", nil),
+            session_ref: settled_ref,
+            settle_failure: failure
+          )
+        rescue StandardError => e
+          error = error_payload(e)
+          failed_result(
+            nil,
+            "ObserveInteractiveFocus",
+            "Could not observe focused worker #{candidate.fetch("id")}: #{error.fetch("message")}",
+            [error.fetch("class"), error.fetch("message")]
+          )
+        end
+      end
+
       def claim_stale_interactive_focus_recovery(agent_id)
         synchronized_state do
           state = normalized_state
@@ -243,6 +291,26 @@ module Meringue
         end
       end
 
+      # PTY output bypasses harness RPC events, but it is still worker activity. The workspace
+      # controller calls this from its background reader, including while the focused pane is
+      # detached, so streamed reasoning and terminal redraws keep the quiet clock current.
+      def note_agent_interactive_activity(agent_id, observed_at: nil)
+        synchronized_state do
+          state = normalized_state
+          current = find_agent(state, agent_id.to_s)
+          return rejected_result(nil, "FocusActivity", "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless current
+          return rejected_result(nil, "FocusActivity", "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless current.fetch("type", nil) == "worker"
+          return accepted_result(nil, "FocusActivity", current.fetch("id"), "Ignored activity outside an interactive focus.", current, []) unless interactive_handoff_marker?(current)
+
+          changed = record_worker_activity!(current, observed_at || timestamp)
+          if changed
+            touch_state!(state)
+            store.save(state)
+          end
+          accepted_result(nil, "FocusActivity", current.fetch("id"), "Recorded focused worker activity.", current, [])
+        end
+      end
+
       # A focused Agent session writes directly to its provider PTY, so it does not pass through the
       # dashboard PromptAgent command. Enter is the durable boundary at which the kernel records user
       # activity; reconciliation later confirms whether the submitted turn is still streaming.
@@ -261,6 +329,7 @@ module Meringue
             "is_streaming" => true,
             "focused_prompt_at" => now
           ).compact
+          record_worker_activity!(current, now)
           refresh_worker_parent_statuses!(state, current, now)
           touch_state!(state, now)
           store.save(state)
@@ -458,7 +527,10 @@ module Meringue
             "is_streaming" => streaming,
             "interactive_handoff" => marker
           )
-          agent["status"] = "working" if streaming && !TERMINAL_AGENT_STATUSES.include?(agent.fetch("status", nil))
+          if streaming
+            agent["status"] = "working" unless TERMINAL_AGENT_STATUSES.include?(agent.fetch("status", nil))
+            record_worker_activity!(agent, now)
+          end
           agent["updated_at"] = now
           touch_state!(state, now)
           store.save(state)

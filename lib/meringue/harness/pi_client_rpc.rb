@@ -38,6 +38,20 @@ module Meringue
         nil
       end
 
+      # Native Pi remains open at its prompt after a turn ends, so process liveness cannot settle a
+      # focused worker. Read the session tail without taking transport ownership and report only a
+      # terminal outcome newer than the assistant checkpoint captured before native focus started.
+      def interactive_turn_outcome(session_ref, handoff: nil)
+        details = handoff.is_a?(Hash) ? (handoff["handoff"] || handoff[:handoff] || handoff) : {}
+        details = {} unless details.is_a?(Hash)
+        current = bounded_turn_outcome(turn_outcome(session_ref))
+        return nil unless current.is_a?(Hash)
+        return nil unless %w[completed failed].include?(current.fetch("state", nil).to_s)
+        return nil if turn_outcome_signature(current) == turn_outcome_signature(details.fetch("turn_checkpoint", nil))
+
+        current
+      end
+
       private
 
       # Native focus reopens the existing durable session without a positional message. Keeping

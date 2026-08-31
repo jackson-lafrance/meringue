@@ -344,6 +344,11 @@ module WorkspaceSupport
       @workspace_path = nil
     end
 
+    def on_output(&callback)
+      @output_callback = callback
+      self
+    end
+
     def start(workspace_path:, rows: 24, columns: 80, on_started: nil)
       @starts << { "workspace_path" => workspace_path, "rows" => rows, "columns" => columns }
       @workspace_path = workspace_path
@@ -382,7 +387,9 @@ module WorkspaceSupport
     end
 
     def feed_output(bytes)
-      @output << bytes.to_s.b
+      chunk = bytes.to_s.b
+      @output << chunk
+      @output_callback&.call(chunk)
       self
     end
 

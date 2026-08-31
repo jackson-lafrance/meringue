@@ -91,13 +91,31 @@ class KernelWorkersQuietWorkerTest < Minitest::Test
     assert_in_delta Time.now, Time.iso8601(last_activity_at(engine, worker_id)), 60
   end
 
-  def test_a_settled_worker_is_never_called_quiet
-    engine, worker_id = quiet_worker(seconds: THRESHOLD * 4)
-    patch_agent!(worker_id) { |record| record["status"] = "completed" }
+  def test_a_turn_that_settles_in_the_quiet_pass_is_never_called_quiet
+    client = RecordingHarnessClient.new(provider: "pi", streaming: false)
+    client.last_assistant_text = "Finished the assigned work."
+    engine, worker_id = quiet_worker(seconds: THRESHOLD * 4, client: client)
 
     apply!(engine, "ReconcileSessions", {})
 
-    assert_empty quiet_logs(engine), "a worker that finished is silent on purpose"
+    assert_equal "completed", agent(engine, worker_id).fetch("status")
+    assert_empty quiet_logs(engine), "settlement runs before quiet detection in the same pass"
+  end
+
+  def test_a_non_text_harness_event_refreshes_the_activity_clock
+    client = streaming_client
+    engine, worker_id = quiet_worker(seconds: THRESHOLD + 60, client: client)
+    client.events = [
+      {
+        "type" => "message_update",
+        "assistantMessageEvent" => { "type" => "thinking_delta", "delta" => "checking" }
+      }
+    ]
+
+    apply!(engine, "ReconcileSessions", {})
+
+    assert_empty quiet_logs(engine)
+    assert_in_delta Time.now, Time.iso8601(last_activity_at(engine, worker_id)), 60
   end
 
   def test_a_worker_still_waiting_on_its_worktree_is_never_called_quiet
