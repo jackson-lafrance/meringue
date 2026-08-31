@@ -641,6 +641,35 @@ module Meringue
         metadata.merge(values)
       end
 
+      def option_value(arguments, option)
+        arguments = Array(arguments).map(&:to_s)
+        index = arguments.index(option)
+        return arguments[index + 1] if index && index + 1 < arguments.length
+
+        prefix = "#{option}="
+        argument = arguments.find { |value| value.start_with?(prefix) }
+        argument&.delete_prefix(prefix)
+      end
+
+      def record_requested_session_model(session_ref, requested_model)
+        return session_ref unless ModelReference.valid?(requested_model)
+
+        effective_model = model_reference_from_settings(session_ref.fetch("session_settings", {}))
+        metadata = (session_ref.fetch("metadata", {}) || {}).merge(
+          "requested_session_model" => requested_model
+        )
+        if ModelReference.valid?(effective_model) && effective_model != requested_model
+          metadata["session_model_substitution"] = {
+            "requested" => requested_model,
+            "effective" => effective_model,
+            "warning" => "Pi substituted model #{effective_model} for requested model #{requested_model}."
+          }
+        else
+          metadata.delete("session_model_substitution")
+        end
+        session_ref.merge("metadata" => metadata)
+      end
+
       def present?(value)
         !value.nil? && !value.to_s.empty?
       end

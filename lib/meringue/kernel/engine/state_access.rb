@@ -658,7 +658,8 @@ module Meringue
           "workspace_path" => agent.fetch("workspace_path", nil),
           "workspace_branch" => agent.fetch("workspace_branch", nil),
           "session_id" => agent.fetch("harness_session_id", nil),
-          "session_file" => agent.fetch("harness_session_file", nil)
+          "session_file" => agent.fetch("harness_session_file", nil),
+          "session_settings" => agent.fetch("session_settings", nil)
         }.compact.transform_values do |value|
           value.is_a?(String) ? value.byteslice(0, 8_000).to_s.scrub : value
         end

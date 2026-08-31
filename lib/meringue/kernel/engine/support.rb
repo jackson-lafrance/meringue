@@ -94,6 +94,37 @@ module Meringue
         mark_head_session_active!(agent)
       end
 
+      def append_session_model_substitution_log(state, agent)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        substitution = metadata.fetch("session_model_substitution", nil)
+        return [] unless substitution.is_a?(Hash)
+
+        requested = substitution.fetch("requested", nil).to_s
+        effective = substitution.fetch("effective", nil).to_s
+        return [] if requested.empty? || effective.empty? || requested == effective
+
+        signature = "#{requested}\u0000#{effective}"
+        return [] if metadata.fetch("session_model_substitution_logged", nil) == signature
+
+        agent["harness_metadata"] = metadata.merge("session_model_substitution_logged" => signature)
+        append_log(
+          state,
+          source_type: "harness",
+          source_id: agent.fetch("id"),
+          level: "warning",
+          message: substitution.fetch(
+            "warning",
+            "Pi substituted model #{effective} for requested model #{requested}."
+          ),
+          details: {
+            "agent_id" => agent.fetch("id"),
+            "requested_model" => requested,
+            "effective_model" => effective,
+            "session_id" => agent.fetch("harness_session_id", nil)
+          }.compact
+        )
+      end
+
       def stable_session_metadata(incoming, persisted)
         return deep_copy(incoming) unless incoming.is_a?(Hash)
 

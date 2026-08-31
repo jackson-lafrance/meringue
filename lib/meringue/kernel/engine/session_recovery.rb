@@ -283,6 +283,7 @@ module Meringue
               "supervision" => bounded_supervision_evidence(supervision)
             }.compact
           )
+          log_ids.concat(append_session_model_substitution_log(state, current))
           touch_state!(state, now)
           store.save(state)
           {

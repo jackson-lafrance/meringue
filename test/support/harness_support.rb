@@ -200,13 +200,27 @@ module HarnessSupport
       emit_raw("#{JSON.generate(payload)}\n", split: split)
     end
 
+    def argv_option(name)
+      index = ARGV.index(name)
+      return ARGV[index + 1] if index && index + 1 < ARGV.length
+
+      prefix = "#{name}="
+      ARGV.find { |argument| argument.start_with?(prefix) }&.delete_prefix(prefix)
+    end
+
+    configured_model = config.fetch("model", { "provider" => "anthropic", "id" => "claude-opus-5", "name" => "Claude Opus 5" })
+    if !config["ignore_argv_model"] && (model_reference = argv_option("--model"))
+      provider, model_id = model_reference.split("/", 2)
+      configured_model = { "provider" => provider, "id" => model_id, "name" => model_id }
+    end
+
     state = {
       "sessionId" => config.fetch("session_id", "stub-session-id"),
       "sessionFile" => config["session_file"],
       "sessionName" => config["session_name"],
       "isStreaming" => config.fetch("is_streaming", false),
-      "model" => config.fetch("model", { "provider" => "anthropic", "id" => "claude-opus-5", "name" => "Claude Opus 5" }),
-      "thinkingLevel" => config.fetch("thinking_level", "max")
+      "model" => configured_model,
+      "thinkingLevel" => argv_option("--thinking") || config.fetch("thinking_level", "max")
     }
 
     Array(config["noise"]).each { |line| emit_raw("#{line}\n") }

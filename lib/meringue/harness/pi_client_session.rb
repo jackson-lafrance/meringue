@@ -114,7 +114,15 @@ module Meringue
         session = resume_session_argument(session_ref)
         session_name = metadata_value(session_ref, "session_name")
         workspace_mode = metadata_value(session_ref, "workspace_mode") || "isolated"
-        argv = build_argv(session_name: session_name, system_prompt: nil, session: session, workspace_mode: workspace_mode)
+        preserved_settings = persisted_session_settings(session_ref)
+        argv = build_argv(
+          session_name: session_name,
+          system_prompt: nil,
+          session: session,
+          session_settings: preserved_settings,
+          workspace_mode: workspace_mode
+        )
+        requested_model = model_reference_from_settings(preserved_settings)
         process = start_rpc_process(argv: argv, cwd: expanded_cwd)
         register_process(process)
 
@@ -129,6 +137,7 @@ module Meringue
           session_name: session_name,
           workspace_mode: workspace_mode
         )
+        resumed_ref = record_requested_session_model(resumed_ref, requested_model)
         attached_ref = preserve_session_identity(resumed_ref, session_ref).merge(
           "metadata" => metadata_with(
             session_ref,

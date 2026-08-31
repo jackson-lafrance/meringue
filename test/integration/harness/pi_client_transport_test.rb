@@ -260,6 +260,96 @@ class HarnessPiClientTransportTest < HarnessIntegrationTest
     assert_equal attached.fetch("pid"), ownership.record_for("pi-sess-1").fetch("pid")
   end
 
+  def test_restore_and_focus_handoff_preserve_a_colon_slash_model_id
+    reference = "fireworks/fireworks:accounts/fireworks/models/glm-5p3"
+    model_change = {
+      "type" => "model_change",
+      "id" => "model-1",
+      "parentId" => "m2",
+      "provider" => "fireworks",
+      "modelId" => "fireworks:accounts/fireworks/models/glm-5p3"
+    }
+    thinking_change = {
+      "type" => "thinking_level_change",
+      "id" => "thinking-1",
+      "parentId" => "model-1",
+      "thinkingLevel" => "high"
+    }
+    mangled_assistant = {
+      "type" => "message",
+      "id" => "m3",
+      "parentId" => "thinking-1",
+      "message" => {
+        "role" => "assistant",
+        "provider" => "fireworks",
+        "model" => "accounts/fireworks/models/glm-5p3",
+        "content" => [{ "type" => "text", "text" => "continued" }],
+        "stopReason" => "endTurn"
+      }
+    }
+    session_file = pi_session_file(
+      tmpdir,
+      session_id: "sess-complex-model",
+      extra_lines: [model_change, thinking_change, mangled_assistant].map { |record| JSON.generate(record) }
+    )
+    client, stub = build_pi_client(
+      tmpdir,
+      stub_config: { "session_id" => "sess-complex-model" },
+      extra_args: ["--model", "openai/future-default", "--thinking", "max"]
+    )
+
+    attached = track_session(
+      client,
+      client.attach_session(pi_session_ref(session_file: session_file, session_id: "sess-complex-model", cwd: tmpdir))
+    )
+
+    assert_includes stub_argv(stub).each_cons(2).to_a, ["--model", reference]
+    assert_includes stub_argv(stub).each_cons(2).to_a, ["--thinking", "high"]
+    assert_equal reference, attached.dig("session_settings", "model", "reference")
+    assert_nil attached.dig("metadata", "session_model_substitution")
+
+    prepared = client.prepare_interactive_session(attached)
+    assert_includes prepared.fetch("interactive_argv").each_cons(2).to_a, ["--model", reference]
+    assert_includes prepared.fetch("interactive_argv").each_cons(2).to_a, ["--thinking", "high"]
+    assert_equal reference, prepared.dig("session_ref", "session_settings", "model", "reference")
+
+    resumed = track_session(client, client.resume_dashboard_session(prepared.fetch("session_ref"), handoff: prepared.fetch("handoff")))
+    assert_includes stub_argv(stub).each_cons(2).to_a, ["--model", reference]
+    assert_equal reference, resumed.dig("session_settings", "model", "reference")
+  end
+
+  def test_restore_prefers_recorded_live_model_over_a_mangled_assistant_model
+    reference = "fireworks/fireworks:accounts/fireworks/models/glm-5p3"
+    mangled_assistant = {
+      "type" => "message",
+      "id" => "m3",
+      "parentId" => "m2",
+      "message" => {
+        "role" => "assistant",
+        "provider" => "fireworks",
+        "model" => "accounts/fireworks/models/glm-5p3",
+        "content" => [{ "type" => "text", "text" => "continued" }],
+        "stopReason" => "endTurn"
+      }
+    }
+    session_file = pi_session_file(
+      tmpdir,
+      session_id: "sess-recorded-model",
+      extra_lines: [JSON.generate(mangled_assistant)]
+    )
+    client, stub = build_pi_client(tmpdir, stub_config: { "session_id" => "sess-recorded-model" })
+    ref = pi_session_ref(session_file: session_file, session_id: "sess-recorded-model", cwd: tmpdir)
+    ref["session_settings"] = {
+      "model" => Meringue::Harness::ModelReference.parse(reference),
+      "thinking_level" => "high"
+    }
+
+    attached = track_session(client, client.attach_session(ref))
+
+    assert_includes stub_argv(stub).each_cons(2).to_a, ["--model", reference]
+    assert_equal reference, attached.dig("session_settings", "model", "reference")
+  end
+
   def test_prepare_interactive_session_aborts_and_settles_a_pending_tool_turn_before_handoff
     progress = {
       "type" => "message_end",

@@ -653,6 +653,7 @@ module Meringue
               "repointed_deferred_agent_ids" => repointed_dependents.fetch("agent_ids").empty? ? nil : repointed_dependents.fetch("agent_ids")
             }.compact
           ))
+          log_ids.concat(append_session_model_substitution_log(state, agent))
           # Whether a worker got its own worktree or continued in someone else's is exactly the kind
           # of thing a user should never have to infer from a branch name.
           log_ids.concat(append_workspace_reuse_log(state, agent, workspace_reuse))

@@ -543,11 +543,12 @@ module Meringue
             refresh_worker_parent_statuses!(state, current, now)
           end
           current["updated_at"] = now
-          # Returning to the dashboard is already visible when native focus closes. Persist the
-          # resumed owner without adding another routine lifecycle row to the user-visible log.
+          # Returning to the dashboard is already visible when native focus closes. Only a model
+          # substitution adds a user-visible row here.
+          log_ids = append_session_model_substitution_log(state, current)
           touch_state!(state, now)
           store.save(state)
-          accepted_result(nil, "EndInteractiveFocus", current.fetch("id"), "Resumed worker #{current.fetch("id")} in the dashboard.", current, [])
+          accepted_result(nil, "EndInteractiveFocus", current.fetch("id"), "Resumed worker #{current.fetch("id")} in the dashboard.", current, log_ids)
         end
       rescue StandardError => e
         synchronized_state do

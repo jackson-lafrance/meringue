@@ -307,6 +307,7 @@ module Meringue
               "head_session_state" => (head.fetch("harness_metadata", {}) || {}).fetch("head_session_state", nil)
             }.compact
           )
+          log_ids.concat(append_session_model_substitution_log(state, head))
           touch_state!(state, now)
           store.save(state)
 

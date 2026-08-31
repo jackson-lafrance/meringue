@@ -79,7 +79,61 @@ class HarnessPiClientProtocolTest < HarnessIntegrationTest
     assert_equal "openai/gpt-5.6-sol", argv[argv.index("--model") + 1]
     assert_equal 1, argv.count("--thinking")
     assert_equal "medium", argv[argv.index("--thinking") + 1]
+    assert_equal "openai/gpt-5.6-sol", ref.dig("session_settings", "model", "reference")
+    assert_nil ref.dig("metadata", "session_model_substitution")
     assert_includes argv, "--tools"
+  end
+
+  def test_spawn_round_trips_a_model_id_with_colons_and_slashes
+    reference = "fireworks/fireworks:accounts/fireworks/models/glm-5p3"
+    client, stub = build_pi_client(tmpdir, extra_args: ["--model", "anthropic/default"])
+
+    ref = client.spawn_session(
+      kind: "worker",
+      cwd: tmpdir,
+      prompt: "",
+      system_prompt: nil,
+      session_name: "Complex model reference",
+      session_settings: { "model" => reference, "thinking_level" => "high" }
+    )
+    track_session(client, ref)
+
+    assert_equal reference, stub_argv(stub)[stub_argv(stub).index("--model") + 1]
+    assert_equal reference, ref.dig("session_settings", "model", "reference")
+    assert_equal "fireworks", ref.dig("session_settings", "model", "provider")
+    assert_equal "fireworks:accounts/fireworks/models/glm-5p3", ref.dig("session_settings", "model", "id")
+    assert_equal reference, ref.dig("metadata", "requested_session_model")
+    assert_nil ref.dig("metadata", "session_model_substitution")
+  end
+
+  def test_spawn_reports_when_pi_substitutes_a_different_model
+    requested = "fireworks/fireworks:accounts/fireworks/models/glm-5p3"
+    effective = "fireworks-300k/fireworks:accounts/fireworks/routers/glm-5p2-fast"
+    client, = build_pi_client(
+      tmpdir,
+      stub_config: {
+        "ignore_argv_model" => true,
+        "model" => {
+          "provider" => "fireworks-300k",
+          "id" => "fireworks:accounts/fireworks/routers/glm-5p2-fast"
+        }
+      }
+    )
+
+    ref = client.spawn_session(
+      kind: "worker",
+      cwd: tmpdir,
+      prompt: "",
+      system_prompt: nil,
+      session_name: "Substituted model",
+      session_settings: { "model" => requested }
+    )
+    track_session(client, ref)
+
+    warning = ref.dig("metadata", "session_model_substitution")
+    assert_equal requested, warning.fetch("requested")
+    assert_equal effective, warning.fetch("effective")
+    assert_equal "Pi substituted model #{effective} for requested model #{requested}.", warning.fetch("warning")
   end
 
   def test_partial_session_override_retains_the_other_configured_default
@@ -220,6 +274,8 @@ class HarnessPiClientProtocolTest < HarnessIntegrationTest
     assert_equal reference, updated.dig("settings", "model", "reference")
     assert_equal "fireworks", updated.dig("settings", "model", "provider")
     assert_equal "fireworks:accounts/fireworks/routers/glm-5p2-fast", updated.dig("settings", "model", "id")
+    assert_equal reference, updated.dig("session_ref", "metadata", "requested_session_model")
+    assert_nil updated.dig("session_ref", "metadata", "session_model_substitution")
     sent = stub_commands_of_type(stub, "set_model").fetch(0)
     assert_equal "fireworks", sent.fetch("provider")
     assert_equal "fireworks:accounts/fireworks/routers/glm-5p2-fast", sent.fetch("modelId")

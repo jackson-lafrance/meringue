@@ -8,6 +8,24 @@ require "support/kernel_workers_support"
 class KernelWorkersSpawnTest < Minitest::Test
   include KernelWorkersSupport
 
+  class SubstitutingHarnessClient < RecordingHarnessClient
+    def spawn_session(**options)
+      ref = super
+      requested = options.fetch(:session_settings).fetch("model")
+      effective = "fireworks-300k/fireworks:accounts/fireworks/routers/glm-5p2-fast"
+      ref.merge(
+        "session_settings" => { "model" => Meringue::Harness::ModelReference.parse(effective) },
+        "metadata" => ref.fetch("metadata").merge(
+          "session_model_substitution" => {
+            "requested" => requested,
+            "effective" => effective,
+            "warning" => "Pi substituted model #{effective} for requested model #{requested}."
+          }
+        )
+      )
+    end
+  end
+
   def test_worker_ids_are_composed_from_project_issue_and_worker_numbers
     engine = build_engine
     context = project_with_issue(engine)
@@ -89,6 +107,23 @@ class KernelWorkersSpawnTest < Minitest::Test
     assert_equal({ "model" => "openai/gpt-5.6-sol", "thinking_level" => "medium" }, spawn_call.fetch("session_settings"))
     assert_equal "openai/gpt-5.6-sol", worker.dig("session_settings", "model", "reference")
     assert_equal "medium", worker.dig("session_settings", "thinking_level")
+  end
+
+  def test_spawn_logs_a_visible_warning_when_the_harness_substitutes_the_model
+    requested = "fireworks/fireworks:accounts/fireworks/models/glm-5p3"
+    client = SubstitutingHarnessClient.new(provider: "pi")
+    engine = build_engine(harness_client: client)
+    context = project_with_issue(engine)
+
+    result = spawn_worker(engine, context.fetch("issue_id"), model: requested)
+
+    warning = state(engine).fetch("logs").last
+    assert_equal "accepted", result.fetch("status")
+    assert_includes result.fetch("log_entry_ids"), warning.fetch("id")
+    assert_equal "warning", warning.fetch("level")
+    assert_equal requested, warning.dig("details", "requested_model")
+    assert_equal "fireworks-300k/fireworks:accounts/fireworks/routers/glm-5p2-fast",
+                 warning.dig("details", "effective_model")
   end
 
   def test_spawn_omits_session_settings_to_retain_harness_defaults
