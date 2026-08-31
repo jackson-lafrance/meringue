@@ -38,6 +38,20 @@ module Meringue
         nil
       end
 
+      # Native Pi remains open at its prompt after a turn ends, so process liveness cannot settle a
+      # focused worker. Read the session tail without taking transport ownership and report only a
+      # terminal outcome newer than the assistant checkpoint captured before native focus started.
+      def interactive_turn_outcome(session_ref, handoff: nil)
+        details = handoff.is_a?(Hash) ? (handoff["handoff"] || handoff[:handoff] || handoff) : {}
+        details = {} unless details.is_a?(Hash)
+        current = bounded_turn_outcome(turn_outcome(session_ref))
+        return nil unless current.is_a?(Hash)
+        return nil unless %w[completed failed].include?(current.fetch("state", nil).to_s)
+        return nil if turn_outcome_signature(current) == turn_outcome_signature(details.fetch("turn_checkpoint", nil))
+
+        current
+      end
+
       private
 
       # Native focus reopens the existing durable session without a positional message. Keeping
@@ -90,6 +104,20 @@ module Meringue
               "The configured Pi command #{name.inspect} could not be resolved for the Agent session " \
               "with PATH=#{path.inspect}. Configure [harness.pi] command with an executable path or make it " \
               "available in [harness.pi.env] PATH, then restart Meringue."
+      end
+
+      def bounded_turn_outcome(outcome)
+        return nil unless outcome.is_a?(Hash)
+
+        outcome.slice("state", "kind", "stop_reason", "turn_ended_at", "last_assistant_text").transform_values do |value|
+          value.is_a?(String) ? value.byteslice(0, 4_000).to_s.scrub : value
+        end.compact
+      end
+
+      def turn_outcome_signature(outcome)
+        return nil unless outcome.is_a?(Hash)
+
+        %w[state kind stop_reason turn_ended_at last_assistant_text].map { |key| outcome.fetch(key, nil).to_s }.join("|")
       end
 
       def prompt_delivery_marker(delivery_id)

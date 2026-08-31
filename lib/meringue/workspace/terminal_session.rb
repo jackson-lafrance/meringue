@@ -48,6 +48,7 @@ module Meringue
         @reader_thread = nil
         @wait_thread = nil
         @configuration_error = nil
+        @output_callback = nil
         @command = LaunchCommand.parse(command, default: default_shell_command(@env), label: "workspace shell_command")
       rescue ArgumentError => e
         @configuration_error = e.message
@@ -56,6 +57,13 @@ module Meringue
       end
 
       attr_reader :configuration_error
+
+      # Registers a lightweight observer for bytes read from the PTY. The reader invokes it outside
+      # the session mutex, so activity bookkeeping cannot block terminal input or screen drains.
+      def on_output(&callback)
+        @mutex.synchronize { @output_callback = callback }
+        self
+      end
 
       def start(workspace_path:, rows: DEFAULT_ROWS, columns: DEFAULT_COLUMNS, on_started: nil)
         path = expanded_workspace_path(workspace_path)
@@ -318,13 +326,19 @@ module Meringue
 
       def append_output(chunk)
         bytes = chunk.to_s.b
-        @mutex.synchronize do
+        callback = @mutex.synchronize do
           @output << bytes
           @transcript << bytes
           trim_buffer!(@output)
           trim_buffer!(@transcript)
           @condition.broadcast
+          @output_callback
         end
+        callback&.call(bytes)
+      rescue StandardError
+        # Output already reached the terminal buffers. An observer failure must never stop the PTY
+        # reader or turn valid provider output into a session failure.
+        nil
       end
 
       def trim_buffer!(buffer)

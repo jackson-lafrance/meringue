@@ -116,6 +116,12 @@ module Meringue
             return rejected_result(nil, "MarkWorkerCompleted", "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"])
           end
           if %w[completed killed].include?(agent.fetch("status", nil))
+            if clear_stale_settled_streaming!(agent)
+              now = timestamp
+              agent["updated_at"] = now
+              touch_state!(state, now)
+              store.save(state)
+            end
             return accepted_result(nil, "MarkWorkerCompleted", agent.fetch("id"), "Worker #{agent.fetch("id")} is already #{agent.fetch("status")}.", agent, [])
           end
           if agent.fetch("status", nil) == "paused"
@@ -249,6 +255,12 @@ module Meringue
             return rejected_result(nil, "MarkWorkerSettleFailed", "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"])
           end
           if %w[completed killed].include?(agent.fetch("status", nil))
+            if clear_stale_settled_streaming!(agent)
+              now = timestamp
+              agent["updated_at"] = now
+              touch_state!(state, now)
+              store.save(state)
+            end
             return accepted_result(nil, "MarkWorkerSettleFailed", agent.fetch("id"), "Worker #{agent.fetch("id")} is already #{agent.fetch("status")}.", agent, [])
           end
           if agent.fetch("status", nil) == "paused"
@@ -343,6 +355,16 @@ module Meringue
       end
 
       private :record_worker_completion, :record_worker_settle_failure
+
+      def clear_stale_settled_streaming!(agent)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        return false if metadata.fetch("is_streaming", false) == false && metadata.key?("is_streaming")
+
+        agent["harness_metadata"] = metadata.merge("is_streaming" => false)
+        true
+      end
+
+      private :clear_stale_settled_streaming!
 
       # A completed worker may carry a kernel-owned continuation that spawns a fresh head with the
       # worker's final report. Merge those nested results into the completion command so callers can

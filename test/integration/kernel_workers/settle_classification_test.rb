@@ -239,6 +239,20 @@ class KernelWorkersSettleClassificationTest < Minitest::Test
     assert_includes log_messages(engine), "Worker #{worker_id} completed."
   end
 
+  def test_repeated_settlement_clears_a_stale_streaming_flag_on_a_terminal_worker
+    client = TurnOutcomeHarnessClient.new(provider: "pi", outcome: { "state" => "completed", "stop_reason" => "endTurn" })
+    client.last_assistant_text = "Done."
+    engine, _context, worker_id = build_worker(client)
+    apply!(engine, "ReconcileSessions", {})
+    patch_agent!(worker_id) { |record| record.fetch("harness_metadata")["is_streaming"] = true }
+
+    result = engine.mark_worker_completed(agent_id: worker_id, last_assistant_text: "Done.")
+
+    assert_equal "accepted", result.fetch("status")
+    assert_equal "completed", agent(engine, worker_id).fetch("status")
+    assert_equal false, agent(engine, worker_id).dig("harness_metadata", "is_streaming")
+  end
+
   def test_a_harness_without_turn_evidence_still_completes_a_settled_worker
     client = EventOnlyHarnessClient.new(provider: "pi")
     client.last_assistant_text = "Delivered the change."
