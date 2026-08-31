@@ -8,6 +8,8 @@ Heads may inspect local project metadata only to choose the right project, issue
 
 Meringue housekeeping is the other exception to "route it to a worker": every user slash command that maps to a kernel command is also proposable by a head. When the user asks for maintenance the kernel already owns, propose that command instead of creating an issue or spawning a worker.
 
+The context JSON includes `active_harness_model_catalog`, a bounded, harness-neutral snapshot for the active worker harness. Use it before naming `SpawnWorker.model`; it contains the harness-reported references and authentication state without transcripts, credentials, or raw harness errors.
+
 ## User commands a head may run
 
 A head-proposed command is applied, validated, journaled, and logged exactly like the typed slash command, and the kernel's own output (for example `Pruned 3 issues, 4 agents, 3 worktrees, and 1 project.`) is written to the visible log by the kernel. Its log header reads `meringue · via H<n>`: Meringue is the command's validator/applier, while the head id records who proposed it. Do not restate that output in the HeadResult summary; use the summary only to explain the decision ("Ran the prune cleanup pass.").
@@ -38,7 +40,7 @@ Natural-language mapping:
 | "use the gruvbox theme" | `SetTheme` |
 | "switch to claude/codex/pi" | `SetHarness` |
 | "show the defaults", "which model will future agents use" | `GetSessionDefaults` (no slash command; this is its only user-facing route) |
-| "what models can I use", "list the available models", "refresh the model list" | `GetModelCatalog` (a status report; the browsable list is the TUI model picker behind `/models`) |
+| "what models can I use", "list the available models", "refresh the model list" | `GetModelCatalog` (a status report; the browsable list is the TUI model picker behind `/models`; optional `role` selects the active head or worker harness) |
 | "use provider/model-id for future agents" / "use openai/gpt-5.6-sol for heads" | `SetDefaultSessionModel` (optional `role`) |
 | "use high thinking for future agents" / "use low thinking for heads" | `SetDefaultSessionThinkingLevel` (optional `role`) |
 | "show P1-I9-W3's model/thinking settings" | `GetInfo` with `target_id` (the agent record carries `session_settings`; there is no per-session settings command) |
@@ -835,7 +837,7 @@ When the predecessor worker is spawned by this same HeadResult, reference its `S
 
 Worker delivery names and text must contain only the human product task. When supplying a worker title or prompt, use the actual issue/task title or requested change that should become the branch and PR title. Never request or suggest Meringue branding or a `meringue/` prefix; project/issue/worker/head ids in any formatting (including `P5-I2-W3`, `p5_i2_w3`, and `P5/I2/W3`); agent, harness, provider, or session identities; AI confidence scores or authorship trailers; or descriptions of which agents worked on the change in branches, worktree names, commits, PR titles/bodies, release notes, or other delivery artifacts. Unsafe supplied/generated values must be sanitized rather than copied. See [`delivery-artifact-privacy.md`](delivery-artifact-privacy.md).
 
-When the user explicitly requests a model or thinking level for this worker, set `model` and/or `thinking_level` on `SpawnWorker`. For example, “spawn a worker using openai/gpt-5.6-sol at medium thinking” becomes `"model": "openai/gpt-5.6-sol", "thinking_level": "medium"`. These settings apply only to that worker. Omit either field to use the configured future-session default for that field; never copy defaults into the command speculatively. Model references use `<provider>/<model-id>` (the model id may contain additional `/` and `:` characters). Thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
+When the user explicitly requests a model or thinking level for this worker, set `model` and/or `thinking_level` on `SpawnWorker`. For example, “spawn a worker using openai/gpt-5.6-sol at medium thinking” becomes `"model": "openai/gpt-5.6-sol", "thinking_level": "medium"`. Before choosing a model, use `active_harness_model_catalog` from the head context. Prefer a listed entry with `authentication: "authenticated"`; do not invent a reference when the catalog is unavailable, unsupported, stale, or authentication is unknown. These settings apply only to that worker. Omit either field to use the configured future-session default for that field; never copy defaults into the command speculatively. An explicit worker override is checked against the cached catalog before provisioning: a current available catalog rejects a missing or explicitly unauthenticated entry, while degraded catalog states accept it as unverified. Model references use `<provider>/<model-id>` (the model id may contain additional `/` and `:` characters). Thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
 
 Payload:
 
@@ -1697,7 +1699,32 @@ kernel/harness validation: an unsupported or non-resumable target is rejected ra
   slash command: the dashboard status line already shows each role's harness plus a compact model/reasoning summary, and
   `/config` displays each role in the full-screen Agent defaults category (`/config --text` prints diagnostics), so the typed `/defaults` was removed. Propose it when the
   user asks about the defaults in natural language.
-- `GetModelCatalog` backs `/models refresh [harness]` with `{ "harness": "pi", "refresh": true }` (the `harness` key stays optional). It is read-only: it asks the harness which models exist, reuses the cached snapshot unless `refresh` is set, and reports an explicit unavailable/unsupported state instead of guessing when the harness cannot answer. Its output is a status (harness, availability, model count, timestamps, note) plus a few example references, not a listing: browsing the catalog is the TUI model picker that bare `/models` opens, which reads the same persisted snapshot. A head proposing this command for "what models can I use" therefore gets a short, scannable answer instead of a hundred log lines.
+- `GetModelCatalog` backs `/models refresh [harness]` with `{ "harness": "pi", "refresh": true }` (the `harness` key stays optional). Add `{ "role": "head" }` or `{ "role": "worker" }` when the active role matters; without `role`, the worker harness is selected. It is read-only: it asks the named harness which models exist, reuses the cached snapshot unless `refresh` is set, and reports an explicit unavailable/unsupported state instead of guessing when the harness cannot answer. Its result and log output include availability, authentication status, model count, timestamps, and a few example references, not a full prompt-sized dump. The same persisted snapshot feeds `active_harness_model_catalog` in later head context and the TUI model picker behind bare `/models`.
+The `active_harness_model_catalog` context object has this compact shape:
+
+```json
+{
+  "role": "worker",
+  "harness": "pi",
+  "availability": "available",
+  "authentication": {
+    "status": "partial",
+    "source": "pi_auth_check",
+    "providers": {
+      "anthropic": { "status": "authenticated" },
+      "openai": { "status": "unauthenticated", "reason": "credentials_not_configured" }
+    }
+  },
+  "model_count": 2,
+  "models": [
+    { "reference": "anthropic/claude-opus-5", "authentication": "authenticated" },
+    { "reference": "openai/gpt-5.6-sol", "authentication": "unauthenticated" }
+  ]
+}
+```
+
+Authentication statuses are `authenticated`, `unauthenticated`, `unknown`, `unavailable`, or `partial`. Choose only `authenticated` entries. If `availability` is `stale`, treat entries as last-known; if it is `unavailable`, `unsupported`, or the reason is `not_fetched`, do not invent a reference. Propose `GetModelCatalog` with `refresh: true`, ask the user to choose a reference, or mark an explicit worker choice unverified.
+
 - `SetDefaultSessionModel` backs the backward-compatible shared `/model <provider>/<model-id>` with
   `{ "model": "provider/model-id" }`. It also backs `/model head <provider>/<model-id>` and
   `/model worker <provider>/<model-id>` with `{ "role": "head", "model": "provider/model-id" }`
@@ -1708,7 +1735,7 @@ kernel/harness validation: an unsupported or non-resumable target is rejected ra
   malformed one). Only shapes that cannot be a reference are rejected: an empty value, whitespace,
   no slash at all, an empty provider or model id, a leading `-`, or a `.`/`..` provider. Validation
   never consults the model catalog: an id the catalog does not list is still saved, and the accepted
-  message labels it unverified. Every rejection names its reason in the visible message.
+  message labels it unverified. Every rejection names its reason in the visible message. This shape-only rule applies to future defaults; an explicit `SpawnWorker.model` is checked against the cached active worker catalog. An available catalog rejects a missing or explicitly unauthenticated entry before provisioning. A stale, unavailable, unsupported, or unknown-auth catalog accepts the worker but records and reports the model as unverified.
 - `SetDefaultSessionThinkingLevel` backs the backward-compatible shared `/thinking <level>` with
   `{ "level": "high" }`. It also backs `/thinking head <level>` and `/thinking worker <level>` with
   `{ "role": "head", "level": "low" }` or the corresponding worker payload. Omitting `role` updates
@@ -1727,7 +1754,7 @@ specific model advertises: an unadvertised level is still accepted, and the acce
 an adjusted level only when the selected harness exposes an authoritative adjustment policy.
 
 See [`session-settings.md`](session-settings.md#authoritative-model-catalog-discovery) for how the
-model catalog is discovered, cached, and degraded.
+model catalog is discovered, cached, authenticated, and degraded.
 
 ### GetState, ListQuestions, Help
 

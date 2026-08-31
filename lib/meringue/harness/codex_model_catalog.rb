@@ -57,7 +57,16 @@ module Meringue
           )
         end
 
-        ModelCatalog.available(harness: "codex", models: entries, source: SOURCE)
+        ModelCatalog.available(
+          harness: "codex",
+          models: entries,
+          source: SOURCE,
+          authentication: {
+            "status" => ModelCatalog::AUTHENTICATION_UNKNOWN,
+            "source" => SOURCE,
+            "reason" => "harness_did_not_report_auth"
+          }
+        )
       rescue JSON::ParserError => e
         ModelCatalog.unavailable(
           harness: "codex",

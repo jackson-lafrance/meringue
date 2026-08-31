@@ -68,6 +68,9 @@ module Meringue
       # A catalog probe is a throwaway ephemeral Pi process, so it should not
       # inherit the long event timeout used for real agent turns.
       DEFAULT_MODEL_CATALOG_TIMEOUT = 30
+      DEFAULT_MODEL_AUTH_TIMEOUT = 10
+      MAX_MODEL_AUTH_PROVIDERS = 128
+      MODEL_AUTH_SOURCE = "pi_auth_check"
 
       # Pi records why a turn stopped on its final assistant message. "error" is a
       # provider/transport failure (dropped connection, DNS/TLS failure, 5xx,
@@ -478,10 +481,18 @@ module Meringue
           data = rpc_data(
             process.request({ "type" => "get_available_models" }, timeout: model_catalog_timeout)
           )
+          models = Array(data["models"]).filter_map { |model| model_catalog_entry(model) }
+          authentication = if data.key?("authentication")
+                            data["authentication"]
+                          elsif data.key?("auth")
+                            data["auth"]
+                          end
+          authentication = model_catalog_authentication(models, cwd: probe_cwd) if authentication.nil?
           ModelCatalog.available(
             harness: harness_name,
-            models: Array(data["models"]).filter_map { |model| model_catalog_entry(model) },
-            source: MODEL_CATALOG_SOURCE
+            models: models,
+            source: MODEL_CATALOG_SOURCE,
+            authentication: authentication
           )
         ensure
           process.terminate(timeout: shutdown_timeout)

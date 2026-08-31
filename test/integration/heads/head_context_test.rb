@@ -17,7 +17,7 @@ class HeadContextTest < Minitest::Test
 
     assert_equal(
       %w[head_id user_message question_id cwd state_access project_discovery
-         current_state_summary routing_context kernel_command_reference],
+         current_state_summary active_harness_model_catalog routing_context kernel_command_reference],
       payload.keys
     )
     assert_equal "H8", payload.fetch("head_id")
@@ -28,6 +28,55 @@ class HeadContextTest < Minitest::Test
       payload.fetch("routing_context").keys
     )
     refute_empty payload.fetch("routing_context").fetch("decision_rules")
+  end
+
+  def test_prompt_payload_exposes_the_active_worker_harness_catalog_and_authentication
+    snapshot = head_snapshot
+    snapshot.fetch("metadata").merge!(
+      "active_harness" => "pi",
+      "active_worker_harness" => "pi",
+      "harness_model_catalogs" => {
+        "pi" => Meringue::Harness::ModelCatalog.available(
+          harness: "pi",
+          models: [
+            { "provider" => "anthropic", "id" => "claude-opus-5", "name" => "Claude Opus 5" },
+            { "provider" => "openai", "id" => "gpt-5.6-sol", "name" => "GPT-5.6 Sol" }
+          ],
+          authentication: {
+            "source" => "pi_auth_check",
+            "providers" => {
+              "anthropic" => { "status" => "authenticated" },
+              "openai" => { "status" => "unauthenticated", "reason" => "credentials_not_configured" }
+            }
+          },
+          source: "test"
+        ).to_h
+      }
+    )
+
+    catalog = build_head_context(snapshot: snapshot).to_prompt_h.fetch("active_harness_model_catalog")
+
+    assert_equal "worker", catalog.fetch("role")
+    assert_equal "pi", catalog.fetch("harness")
+    assert_equal "partial", catalog.dig("authentication", "status")
+    assert_equal %w[anthropic/claude-opus-5 openai/gpt-5.6-sol], catalog.fetch("models").map { |model| model.fetch("reference") }
+    assert_equal %w[authenticated unauthenticated], catalog.fetch("models").map { |model| model.fetch("authentication") }
+    refute catalog.key?("note")
+    refute catalog.key?("error")
+    assert_equal "credentials_not_configured", catalog.dig("authentication", "providers", "openai", "reason")
+  end
+
+  def test_prompt_payload_reports_an_unavailable_catalog_without_inventing_models
+    snapshot = head_snapshot
+    snapshot.fetch("metadata").merge!("active_harness" => "codex", "active_worker_harness" => "codex")
+
+    catalog = build_head_context(snapshot: snapshot).to_prompt_h.fetch("active_harness_model_catalog")
+
+    assert_equal "codex", catalog.fetch("harness")
+    assert_equal "unavailable", catalog.fetch("availability")
+    assert_equal "not_fetched", catalog.fetch("reason")
+    assert_empty catalog.fetch("models")
+    assert_includes catalog.fetch("instruction"), "Do not invent"
   end
 
   def test_state_summary_counts_projects_issues_agents_and_open_questions

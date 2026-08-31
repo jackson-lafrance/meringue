@@ -502,6 +502,94 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     assert_includes result.fetch("message"), "#{MULTI_SEGMENT_MODEL} is unverified"
   end
 
+  def test_worker_model_override_is_rejected_before_provisioning_when_catalog_disproves_it
+    add_project!(name: "catalog-validation")
+    create_issue!("P1", title: "Validate worker models")
+    @engine.send(
+      :persist_model_catalog!,
+      "pi",
+      Meringue::Harness::ModelCatalog.available(
+        harness: "pi",
+        models: [{ "provider" => "openai", "id" => "gpt-real" }],
+        authentication: {
+          "providers" => {
+            "openai" => { "status" => "authenticated" }
+          }
+        },
+        source: "test"
+      ).to_h
+    )
+
+    rejected = apply_command(
+      "SpawnWorker",
+      "issue_id" => "P1-I1",
+      "prompt" => "Do the work",
+      "model" => "openai/gpt-does-not-exist"
+    )
+
+    assert_rejected(rejected, "model_not_in_harness_catalog")
+    assert_includes rejected.fetch("message"), "does not report openai/gpt-does-not-exist"
+    assert_empty persisted_agents
+  end
+
+  def test_worker_model_override_rejects_a_model_that_the_catalog_marks_unauthenticated
+    add_project!(name: "catalog-auth-validation")
+    create_issue!("P1", title: "Validate worker authentication")
+    @engine.send(
+      :persist_model_catalog!,
+      "pi",
+      Meringue::Harness::ModelCatalog.available(
+        harness: "pi",
+        models: [{ "provider" => "openai", "id" => "gpt-no-key" }],
+        authentication: {
+          "providers" => {
+            "openai" => { "status" => "unauthenticated", "reason" => "credentials_not_configured" }
+          }
+        },
+        source: "test"
+      ).to_h
+    )
+
+    rejected = apply_command(
+      "SpawnWorker",
+      "issue_id" => "P1-I1",
+      "prompt" => "Do the work",
+      "model" => "openai/gpt-no-key"
+    )
+
+    assert_rejected(rejected, "model_not_authenticated")
+    assert_includes rejected.fetch("message"), "authentication is not ready"
+    assert_empty persisted_agents
+  end
+
+  def test_worker_model_override_records_unverified_state_when_catalog_is_unavailable
+    add_project!(name: "catalog-degraded")
+    create_issue!("P1", title: "Use a degraded catalog")
+    @engine.send(
+      :persist_model_catalog!,
+      "pi",
+      Meringue::Harness::ModelCatalog.unavailable(
+        harness: "pi",
+        note: "Pi auth is temporarily unavailable",
+        reason: "fetch_failed"
+      ).to_h
+    )
+
+    result = apply_command(
+      "SpawnWorker",
+      "issue_id" => "P1-I1",
+      "prompt" => "Do the work",
+      "model" => "openai/gpt-maybe"
+    )
+
+    assert_accepted(result)
+    worker = persisted_agents.fetch(0)
+    validation = worker.dig("harness_metadata", "model_validation")
+    assert_equal "unverified", validation.fetch("status")
+    assert_equal "catalog_unavailable", validation.fetch("reason")
+    assert_includes result.fetch("message"), "Model openai/gpt-maybe is unverified"
+  end
+
   # A rejected level used to read only "Default Pi thinking level was not
   # changed.", which never said which words are legal, so the user had to guess
   # ("xhi", "ten"). The user-visible message now carries the ladder itself and

@@ -15,6 +15,7 @@ module Meringue
         requested_model = value_at(payload, "model", "Model")
         requested_thinking_level = value_at(payload, "thinking_level", "thinkingLevel", "ThinkingLevel")
         session_settings_override = {}
+        model_validation = nil
         follow_up_of_agent_id = value_at(payload, "follow_up_of_agent_id", "followUpOfAgentID", "followUpOfAgentId")
         replace_agent_id = value_at(payload, "replace_agent_id", "replaceAgentID", "replaceAgentId")
         after_agent_id = value_at(payload, *DEFERRED_WORKER_AFTER_KEYS)
@@ -116,6 +117,7 @@ module Meringue
           project = find_project(state, issue.fetch("project_id"))
           return rejected_result(command_id, command_type, "Project #{issue.fetch("project_id")} does not exist.", ["project_not_found"]) unless project
 
+          active_provider = active_harness_provider(state)
           # An activation names the queued record directly: its reservation was written by an earlier
           # command, so resolving it only through spawn_command_id would risk provisioning a second
           # worker for the same queued record.
@@ -163,6 +165,19 @@ module Meringue
           end
 
           unless existing
+            model_validation = worker_model_validation(
+              state,
+              provider: active_provider,
+              reference: session_settings_override.fetch("model", nil)
+            )
+            if model_validation && model_validation.fetch("status", nil) == "rejected"
+              return rejected_result(
+                command_id,
+                command_type,
+                worker_model_validation_message(model_validation),
+                [model_validation.fetch("error_code")]
+              )
+            end
             related_agent_id = present_string(replace_agent_id) || present_string(follow_up_of_agent_id)
             related_agent = find_agent(state, related_agent_id) if related_agent_id
             if related_agent_id && (!related_agent || related_agent.fetch("type", nil) != "worker")
@@ -238,6 +253,7 @@ module Meringue
                   include_predecessor_result: include_predecessor_result,
                   completion_continuation: completion_continuation,
                   session_settings_override: session_settings_override,
+                  model_validation: model_validation,
                   workspace_mode: workspace_mode,
                   command_gate: command_gate,
                   rerouted_from_issue_id: rerouted_from_issue_id,
@@ -265,7 +281,6 @@ module Meringue
             end
           end
 
-          active_provider = active_harness_provider(state)
           now = timestamp
           if existing
             agent_id = existing.fetch("id")
@@ -370,6 +385,7 @@ module Meringue
               after_agent_id: present_string(after_agent_id),
               completion_continuation: completion_continuation,
               session_settings_override: session_settings_override,
+              model_validation: model_validation,
               workspace_reuse_request: reuse_request,
               workspace_mode: workspace_mode,
               portable_import: portable_import,
@@ -649,6 +665,7 @@ module Meringue
               "title" => agent.fetch("harness_metadata", {}).fetch("title", nil),
               "rerouted_from_issue_id" => rerouted_from_issue_id,
               "workspace_reuse" => workspace_reuse,
+              "model_validation" => agent.dig("harness_metadata", "model_validation"),
               "session_settings" => agent.fetch("session_settings", nil),
               "repointed_deferred_agent_ids" => repointed_dependents.fetch("agent_ids").empty? ? nil : repointed_dependents.fetch("agent_ids")
             }.compact

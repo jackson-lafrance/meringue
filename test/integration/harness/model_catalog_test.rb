@@ -34,6 +34,40 @@ class HarnessModelCatalogTest < HarnessIntegrationTest
     assert_equal "available", catalog.to_h.fetch("availability")
   end
 
+  def test_catalog_carries_harness_neutral_authentication_status_per_model
+    catalog = Catalog.available(
+      harness: "pi",
+      models: [
+        { "provider" => "anthropic", "id" => "claude-opus-5" },
+        { "provider" => "openai", "id" => "gpt-5.6-sol" }
+      ],
+      authentication: {
+        "source" => "pi_auth_check",
+        "providers" => {
+          "anthropic" => { "status" => "ready", "source" => "stored" },
+          "openai" => { "status" => "not_ready", "reason" => "credentials_not_configured" }
+        }
+      },
+      source: "test"
+    )
+
+    assert_equal Catalog::AUTHENTICATION_PARTIAL, catalog.authentication.fetch("status")
+    assert_equal Catalog::AUTHENTICATED, catalog.authentication_for("anthropic/claude-opus-5")
+    assert_equal Catalog::UNAUTHENTICATED, catalog.authentication_for("openai/gpt-5.6-sol")
+    assert catalog.authenticated?("anthropic/claude-opus-5")
+    refute catalog.authenticated?("openai/gpt-5.6-sol")
+    assert_equal "credentials_not_configured", catalog.authentication.fetch("providers").fetch("openai").fetch("reason")
+
+    head_view = catalog.to_head_h(role: "worker")
+    assert_equal "partial", head_view.dig("authentication", "status")
+    assert_equal "authenticated", head_view.dig("models", 0, "authentication")
+    assert_equal "unauthenticated", head_view.dig("models", 1, "authentication")
+    refute head_view.key?("note")
+    refute head_view.key?("error")
+
+    assert_equal Catalog::UNAUTHENTICATED, Catalog.entry(provider: "openai", id: "gpt-no-key", authenticated: false).fetch("authentication")
+  end
+
   def test_catalog_normalization_is_bounded
     models = (0..(Catalog::MAX_MODELS + 25)).map do |index|
       { "provider" => "test", "id" => "model-#{index}" }
@@ -179,6 +213,29 @@ class HarnessModelCatalogTest < HarnessIntegrationTest
     assert_equal ["get_available_models"], stub_commands(stub).map { |command| command.fetch("type") }
   end
 
+  def test_pi_client_reports_provider_authentication_without_exposing_credentials
+    client, = build_pi_client(
+      tmpdir,
+      stub_config: {
+        "auth_statuses" => {
+          "anthropic" => { "status" => "ready", "source" => "stored", "token" => "sk-SECRET" },
+          "openai" => { "status" => "not_ready", "reason" => "credentials_not_configured", "token" => "sk-SECRET" },
+          "google" => { "status" => "unknown", "reason" => "auth_check_failed" }
+        }
+      }
+    )
+
+    catalog = client.available_models(cwd: tmpdir)
+
+    assert_equal "partial", catalog.authentication.fetch("status")
+    assert_equal "authenticated", catalog.authentication_for("anthropic/claude-opus-5")
+    assert_equal "unauthenticated", catalog.authentication_for("openai/gpt-5.6-sol")
+    assert_equal "unknown", catalog.authentication_for("google/gemini-3-flash")
+    serialized = JSON.generate(catalog.to_h)
+    refute_includes serialized, "sk-SECRET"
+    refute_includes serialized, '"token":'
+  end
+
   # A model's advertised levels explain what Pi will run, they are not permission
   # to choose: Pi clamps an unlisted level (up the ladder first, then down)
   # instead of failing, and a provider extension can under-declare what its model
@@ -260,6 +317,8 @@ class HarnessModelCatalogTest < HarnessIntegrationTest
     assert_equal %w[anthropic/sonnet anthropic/opus anthropic/haiku anthropic/claude-sonnet-4-6], catalog.references
     assert_equal %w[low medium high xhigh max], catalog.thinking_levels_for("anthropic/opus")
     assert_equal true, catalog.entry_for("anthropic/sonnet").fetch("reasoning")
+    assert_equal Catalog::AUTHENTICATION_UNKNOWN, catalog.authentication.fetch("status")
+    assert_equal Catalog::AUTHENTICATION_UNKNOWN, catalog.authentication_for("anthropic/sonnet")
   end
 
   def test_claude_code_catalog_fetch_is_ephemeral_and_reports_failures
@@ -300,6 +359,7 @@ class HarnessModelCatalogTest < HarnessIntegrationTest
     assert_equal ["openai/gpt-5.6-sol"], catalog.references
     assert_equal %w[low high max], catalog.thinking_levels_for("openai/gpt-5.6-sol")
     assert_equal 272_000, catalog.entry_for("openai/gpt-5.6-sol").fetch("context_window")
+    assert_equal Catalog::AUTHENTICATION_UNKNOWN, catalog.authentication.fetch("status")
   end
 
   def test_codex_catalog_fetch_is_ephemeral_and_reports_failures
@@ -341,6 +401,7 @@ class HarnessModelCatalogTest < HarnessIntegrationTest
     pi_catalog = registry.model_catalog(provider: "pi", cwd: tmpdir)
     assert pi_catalog.available?, pi_catalog.to_h.inspect
     assert_equal "pi", pi_catalog.harness
+    assert_equal Catalog::AUTHENTICATED, pi_catalog.authentication.fetch("status")
     assert_includes pi_catalog.references, "anthropic/claude-opus-5"
 
     claude_catalog = registry.model_catalog(provider: "claude", cwd: tmpdir)

@@ -180,6 +180,9 @@ module Meringue
         catalog = result.is_a?(Hash) ? result : {}
         models = Array(catalog["models"])
         lines = ["  harness: #{catalog.fetch("harness", "unknown")}", "  availability: #{catalog.fetch("availability", "unknown")}"]
+        authentication = catalog.fetch("authentication", nil)
+        authentication_status = authentication.is_a?(Hash) ? authentication.fetch("status", nil) : authentication
+        lines << "  authentication: #{authentication_status}" if authentication_status
         lines << "  models: #{models.length}" unless models.empty?
         lines << "  source: #{catalog.fetch("source")}" if catalog["source"]
         lines << "  confirmed: #{catalog.fetch("fetched_at")}" if catalog["fetched_at"]

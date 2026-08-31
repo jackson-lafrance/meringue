@@ -42,9 +42,17 @@ module Meringue
       # process while the user types.
       def get_model_catalog(command_id, command_type, payload)
         requested = value_at(payload, "harness", "provider", "Harness", "Provider")
+        requested_role = value_at(payload, "role", "Role")
+        role = requested_role.to_s.strip.downcase
+        if !role.empty? && !%w[head worker].include?(role)
+          return synchronized_state do
+            rejected_result(command_id, command_type, "Model catalog was not loaded.", ["role must be one of: head, worker"])
+          end
+        end
+        role = "worker" if role.empty?
         provider =
           if blank?(requested)
-            synchronized_state { active_harness_provider(normalized_state) }
+            synchronized_state { active_harness_provider(normalized_state, role: role) }
           else
             begin
               Meringue::Harness::Registry.normalize_provider!(requested)
@@ -229,6 +237,73 @@ module Meringue
           "availability" => snapshot.fetch("availability", nil),
           "model_count" => snapshot.fetch("model_count", 0)
         }
+      end
+
+      # A worker override can be checked against a fresh harness-owned list before
+      # workspace or session provisioning starts. Degraded snapshots stay usable,
+      # but the reservation records that the model was not verified.
+      def worker_model_validation(state, provider:, reference:)
+        return nil if reference.to_s.strip.empty?
+
+        public_name = Meringue::Harness::Registry.public_provider_name(provider)
+        snapshot = state.dig("metadata", "harness_model_catalogs", public_name)
+        catalog = Meringue::Harness::ModelCatalog.coerce(snapshot, harness: public_name)
+        base = {
+          "reference" => reference.to_s,
+          "harness" => public_name,
+          "catalog_availability" => catalog.availability,
+          "catalog_fetched_at" => catalog.fetched_at
+        }.compact
+        unless snapshot.is_a?(Hash)
+          return base.merge("status" => "unverified", "reason" => "catalog_not_fetched")
+        end
+
+        entry = catalog.entry_for(reference)
+        if catalog.available?
+          unless entry
+            # A snapshot exactly at the bound may be truncated. Do not reject a
+            # valid extension model merely because it fell beyond that bound.
+            return base.merge("status" => "unverified", "reason" => "not_in_bounded_catalog") if catalog.model_count >= Meringue::Harness::ModelCatalog::MAX_MODELS
+
+            return base.merge(
+              "status" => "rejected",
+              "reason" => "not_in_catalog",
+              "error_code" => "model_not_in_harness_catalog"
+            )
+          end
+
+          authentication = catalog.authentication_for(reference)
+          if authentication == Meringue::Harness::ModelCatalog::UNAUTHENTICATED
+            return base.merge(
+              "status" => "rejected",
+              "reason" => "not_authenticated",
+              "error_code" => "model_not_authenticated"
+            )
+          end
+
+          return base.merge(
+            "status" => authentication == Meringue::Harness::ModelCatalog::AUTHENTICATED ? "verified" : "unverified",
+            "reason" => authentication ? "authentication_#{authentication}" : "catalog_entry"
+          )
+        end
+
+        base.merge(
+          "status" => "unverified",
+          "reason" => catalog.stale? ? "stale_catalog" : "catalog_#{catalog.availability}"
+        )
+      end
+
+      def worker_model_validation_message(validation)
+        reference = validation.fetch("reference")
+        harness = validation.fetch("harness")
+        case validation.fetch("reason")
+        when "not_in_catalog"
+          "Worker was not spawned: #{harness} does not report #{reference} in its current model catalog. Run /models refresh and choose a listed model."
+        when "not_authenticated"
+          "Worker was not spawned: #{harness} reports #{reference}, but its provider authentication is not ready. Choose an authenticated model or run /models refresh."
+        else
+          "Worker was not spawned because model #{reference} failed harness catalog validation."
+        end
       end
 
       # Shape validation only, and deliberately catalog-independent: a model the
@@ -540,7 +615,18 @@ module Meringue
           return "Meringue has no confirmed #{label} model list right now, so #{reference} is unverified; " \
                  "run /models refresh to check it. #{label} validates it when the next session starts."
         end
-        return nil if catalog.entry_for(reference)
+        entry = catalog.entry_for(reference)
+        if entry
+          authentication = catalog.authentication_for(reference)
+          return nil if authentication.nil? || authentication == Meringue::Harness::ModelCatalog::AUTHENTICATED
+
+          auth_note = if authentication == Meringue::Harness::ModelCatalog::UNAUTHENTICATED
+                        "#{label} reports that its provider authentication is not ready"
+                      else
+                        "#{label} could not confirm provider authentication"
+                      end
+          return "#{auth_note} for #{reference}, so the id is unverified; run /models refresh to check it."
+        end
 
         "#{label}'s model list (confirmed #{catalog.fetched_at}) does not include #{reference}, so the id is unverified; " \
           "run /models refresh if it should be there. #{label} validates it when the next session starts."

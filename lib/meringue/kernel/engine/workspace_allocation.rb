@@ -523,6 +523,12 @@ module Meringue
                    "#{base} Shared read-only checkout unavailable#{fallback ? " (#{fallback})" : ""}; using an isolated workspace."
                  end
         end
+        validation = (agent.fetch("harness_metadata", {}) || {}).fetch("model_validation", nil)
+        if validation.is_a?(Hash) && validation.fetch("status", nil) == "unverified"
+          reference = validation.fetch("reference", "the requested model")
+          reason = validation.fetch("reason", "catalog_unavailable").to_s.tr("_", " ")
+          base = "#{base} Model #{reference} is unverified (#{reason})."
+        end
         rerouted_from = present_string((agent.fetch("harness_metadata", {}) || {}).fetch("rerouted_from_issue_id", nil))
         return base unless rerouted_from
 
