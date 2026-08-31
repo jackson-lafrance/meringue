@@ -291,7 +291,8 @@ worktree_provider = "native_git"
 ```
 
 A user may opt into a private local adapter executable without adding provider-specific knowledge to
-Meringue:
+Meringue. The same provider settings can be persisted on an individual project record when adding
+that project, so one repository can use gitstream while this repository keeps native Git:
 
 ```toml
 [workspace]
@@ -299,6 +300,11 @@ worktree_provider = "command"
 worktree_provider_command = ["/absolute/path/to/private-worktree-adapter"]
 worktree_provider_fallback = "native_git" # default; use "none" to fail closed
 ```
+
+`AddProject` accepts `workspace_root`, `worktree_provider`, `worktree_provider_command`, and
+`worktree_provider_fallback` fields. These project-local fields override the global `[workspace]`
+defaults for future workers. For example, register World with `workspace_root = "~/world/trees"`
+and a command adapter that invokes `dev tree`; do not edit Meringue state JSON.
 
 The command setting is argv, not a shell snippet. A string is accepted for compatibility and split
 with shell quoting rules, but Meringue always spawns the resulting arguments directly. Task names,

@@ -436,11 +436,14 @@ module Meringue
 
       def allocate_reserved_candidate_worktree(plan:, git_root:, base_ref:, relative_project_path:, branch:, worktree_root:,
                                                progress: nil, attempt_started: nil, profile: nil)
-        selected_provider = worktree_provider
+        selected_provider = WorktreeProvider.build(
+          kind: plan.fetch("worktree_provider", worktree_provider.kind),
+          command: plan.fetch("worktree_provider_command", @worktree_provider_command)
+        )
         if selected_provider.external?
           incompatibility = external_provider_profile_incompatibility(profile)
           if incompatibility
-            return external_provider_unavailable_outcome(selected_provider, incompatibility) unless native_provider_fallback?
+            return external_provider_unavailable_outcome(selected_provider, incompatibility) unless native_provider_fallback?(plan)
 
             plan = worktree_provider_fallback_plan(plan, selected_provider, incompatibility)
           else
@@ -459,7 +462,7 @@ module Meringue
             return external unless external.fetch("fallback_to_native", false)
 
             reason = external.fetch("fallback_reason", "external_provider_unavailable")
-            return external_provider_unavailable_outcome(selected_provider, reason) unless native_provider_fallback?
+            return external_provider_unavailable_outcome(selected_provider, reason) unless native_provider_fallback?(plan)
 
             plan = worktree_provider_fallback_plan(plan, selected_provider, reason)
           end
@@ -745,7 +748,7 @@ module Meringue
             progress: progress
           )
         rescue Errno::ENOENT => e
-          release_owned_branch(git_root, branch) if created_branch && !native_provider_fallback?
+          release_owned_branch(git_root, branch) if created_branch && !native_provider_fallback?(plan)
           return {
             "fallback_to_native" => true,
             "fallback_reason" => "configured worktree provider command is unavailable (#{e.message})"

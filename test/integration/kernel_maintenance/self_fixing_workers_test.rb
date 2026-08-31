@@ -61,6 +61,10 @@ class SelfFixingWorkersTest < Minitest::Test
     assert_equal 1, @spawned.length
   end
 
+  def test_recovery_title_includes_source_task_title
+    assert_equal "Self-fix: Fix checkout", Meringue::Experiments::SelfFixingWorkers.title("title" => "Fix checkout")
+  end
+
   def test_recovery_workers_are_not_eligible_for_another_recovery
     worker = initial_state.fetch("agents").first.merge(
       "status" => "errored",

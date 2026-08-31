@@ -43,7 +43,7 @@ Setup preselects a harness only when exactly one is installed. With several, or 
 
 ## Registering a project
 
-Setup registers nothing. When a project is added, its version-control backend is probed and its capability snapshot is persisted. Registration is rejected unless isolated mutable workspaces are available; workers never fall back to the project root. See `docs/version-control-backends.md` for alternate backend integration.
+Setup registers nothing. When a project is added, its version-control backend is probed and its capability snapshot is persisted. Registration does not require a GitHub origin: gitstream repositories, plain Git directories, non-Git directories, and question-only workers remain usable. Workers degrade gracefully: no forge means no pull request, and no Git means findings only. See `docs/version-control-backends.md` for alternate backend integration.
  Project discovery and registration happen later, when the first goal is routed: registering a project is orchestration state rather than configuration, and a rejected draft must not be able to leave a project behind from a setup that never finished.
 
 ## Interaction

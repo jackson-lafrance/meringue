@@ -61,7 +61,10 @@ module Meringue
       end
 
       def title(worker)
-        "Self-fix #{worker.fetch("id", "worker")}"
+        source_title = worker.fetch("title", nil).to_s.strip
+        source_title = worker.fetch("task_title", nil).to_s.strip if source_title.empty?
+        source_title = "worker" if source_title.empty?
+        "Self-fix: #{source_title}"
       end
     end
   end

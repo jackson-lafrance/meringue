@@ -569,7 +569,7 @@ module Meringue
 
       def add_workspace(settings)
         settings.concat([
-          definition("workspace.worktree_provider", %w[workspace worktree_provider], "Workspace", "enum", "native_git", options: %w[native_git command], editor: "selector", label: "Legacy worktree provider", description: "Compatibility setting; new workers require explicit isolated-workspace evidence.", advanced: true),
+          definition("workspace.worktree_provider", %w[workspace worktree_provider], "Workspace", "enum", "native_git", options: %w[native_git command], editor: "selector", label: "Alternate backend provider", description: "Supported extension point for a backend such as gitstream; native Git remains the default.", advanced: true),
           definition("workspace.worktree_provider_fallback", %w[workspace worktree_provider_fallback], "Workspace", "enum", "native_git", options: %w[native_git none], editor: "selector", label: "Worktree fallback", description: "Use native Git when the command provider is unavailable before it mutates a worktree.", advanced: true),
           definition("workspace.worktree_provider_command", %w[workspace worktree_provider_command], "Workspace", "command_argv", [], editor: "command", label: "Worktree provider command", description: "Executable argv prefix implementing the generic worktree provider protocol.", advanced: true, optional: true),
           definition("workspace.root", %w[workspace root_path], "Workspace", "path", ->(_config, _env) { File.expand_path("~/.meringue/workspaces") }, editor: "text", label: "Workspace root", description: "Parent directory for native Git worktrees and ownership records for provider-managed worktrees.", advanced: true),

@@ -42,6 +42,29 @@ class WorkspaceManagerCommandProviderTest < Minitest::Test
                  Meringue::Config::Schema.fetch("workspace.worktree_provider").option_values
   end
 
+  def test_project_settings_override_global_workspace_defaults
+    with_workspace_tmpdir do |tmp|
+      project = create_git_project(tmp).fetch("project_root")
+      project_root = File.join(tmp, "world-trees")
+      plan = Meringue::Workspace::Manager.new(root_path: File.join(tmp, "native"), command_timeout: 30).plan_worker_workspace(
+        project_root: project,
+        project_id: "P1",
+        issue_id: "P1-I1",
+        agent_id: "P1-I1-W1",
+        task_title: "World task",
+        workspace_root: project_root,
+        worktree_provider: "command",
+        worktree_provider_command: [RbConfig.ruby, "adapter"],
+        worktree_provider_fallback: "none"
+      )
+      assert_equal project_root, plan.fetch("workspace_root")
+      assert_equal "command", plan.fetch("worktree_provider")
+      assert_equal [RbConfig.ruby, "adapter"], plan.fetch("worktree_provider_command")
+      assert_equal "none", plan.fetch("worktree_provider_fallback")
+      assert plan.fetch("workspace_path").start_with?(project_root)
+    end
+  end
+
   def test_command_provider_provisions_validates_reuses_and_prunes_selected_path
     with_workspace_tmpdir do |tmp|
       project = create_git_project(tmp)

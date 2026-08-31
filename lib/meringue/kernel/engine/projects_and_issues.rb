@@ -100,6 +100,12 @@ module Meringue
           "version_control_capabilities" => capability.fetch("capabilities", {}),
           "version_control_diagnostics" => Array(capability["diagnostics"]),
           "version_control_diagnostic_at" => capability["diagnostic_at"],
+          # These optional fields are project-local overrides. Global workspace defaults remain
+          # unchanged, while World and similar repositories can select their own provider path.
+          "workspace_root" => value_at(payload, "workspace_root", "WorkspaceRoot"),
+          "worktree_provider" => value_at(payload, "worktree_provider", "WorktreeProvider"),
+          "worktree_provider_command" => value_at(payload, "worktree_provider_command", "WorktreeProviderCommand"),
+          "worktree_provider_fallback" => value_at(payload, "worktree_provider_fallback", "WorktreeProviderFallback"),
           "status" => "working",
           "created_at" => now,
           "updated_at" => now

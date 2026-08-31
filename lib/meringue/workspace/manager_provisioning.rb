@@ -192,8 +192,9 @@ module Meringue
         record.is_a?(Hash) && record["name"] == BARE_DEFAULT_PROFILE_NAME
       end
 
-      def native_provider_fallback?
-        worktree_provider_fallback == WorktreeProvider::NATIVE_GIT
+      def native_provider_fallback?(plan = nil)
+        fallback = plan.is_a?(Hash) ? plan.fetch("worktree_provider_fallback", worktree_provider_fallback) : worktree_provider_fallback
+        fallback == WorktreeProvider::NATIVE_GIT
       end
 
       def worktree_provider_fallback_plan(plan, provider, reason)
@@ -217,7 +218,8 @@ module Meringue
       def provider_for_workspace(workspace)
         plan = workspace.is_a?(Hash) && workspace["plan"].is_a?(Hash) ? workspace.fetch("plan") : workspace
         kind = plan.is_a?(Hash) ? plan.fetch("worktree_provider", WorktreeProvider::NATIVE_GIT) : WorktreeProvider::NATIVE_GIT
-        WorktreeProvider.new(kind: kind, command: @worktree_provider_command)
+        command = plan.is_a?(Hash) ? plan.fetch("worktree_provider_command", @worktree_provider_command) : @worktree_provider_command
+        WorktreeProvider.new(kind: kind, command: command)
       end
 
       def release_external_workspace(workspace, provider:, preserve_branch:, deadline: nil)

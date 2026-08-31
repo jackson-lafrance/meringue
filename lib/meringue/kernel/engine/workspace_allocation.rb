@@ -201,7 +201,8 @@ module Meringue
                    agent_id: preview_agent_id,
                    task_title: task_title,
                    progress_agent_id: progress_agent_id,
-                   unavailable_paths: unavailable_paths
+                   unavailable_paths: unavailable_paths,
+                   project: project
                  )
                else
                  workspace_manager.plan_worker_workspace(
@@ -209,7 +210,11 @@ module Meringue
                    project_id: project.fetch("id"),
                    issue_id: issue.fetch("id"),
                    agent_id: preview_agent_id,
-                   task_title: task_title
+                   task_title: task_title,
+                   workspace_root: project.fetch("workspace_root", nil),
+                   worktree_provider: project.fetch("worktree_provider", nil),
+                   worktree_provider_command: project.fetch("worktree_provider_command", nil),
+                   worktree_provider_fallback: project.fetch("worktree_provider_fallback", nil)
                  ).merge("errors" => [])
                end
 
@@ -283,17 +288,23 @@ module Meringue
       # difference between "checking out 478k files" and "wedged", so a long allocation reports
       # progress into the worker record and the log instead of going silent.
       def allocate_worker_workspace_with_progress(project_root:, project_id:, issue_id:, agent_id:, task_title:, progress_agent_id:,
-                                                  unavailable_paths: [])
+                                                  unavailable_paths: [], project: nil)
         arguments = {
           project_root: project_root,
           project_id: project_id,
           issue_id: issue_id,
           agent_id: agent_id,
-          task_title: task_title
+          task_title: task_title,
+          workspace_root: project ? project.fetch("workspace_root", nil) : nil,
+          worktree_provider: project ? project.fetch("worktree_provider", nil) : nil,
+          worktree_provider_command: project ? project.fetch("worktree_provider_command", nil) : nil,
+          worktree_provider_fallback: project ? project.fetch("worktree_provider_fallback", nil) : nil
         }
-        if workspace_manager.method(:allocate_worker_workspace).parameters.any? { |(_kind, name)| name == :unavailable_paths }
-          arguments[:unavailable_paths] = unavailable_paths
+        supported_keywords = workspace_manager.method(:allocate_worker_workspace).parameters.filter_map do |kind, name|
+          name if [:key, :keyreq].include?(kind)
         end
+        arguments.delete_if { |name, _value| name != :task_title && !supported_keywords.include?(name) }
+        arguments[:unavailable_paths] = unavailable_paths if supported_keywords.include?(:unavailable_paths)
         return workspace_manager.allocate_worker_workspace(**arguments) unless progress_agent_id
         unless workspace_manager.method(:allocate_worker_workspace).parameters.any? { |(_kind, name)| name == :progress }
           # A workspace manager double (or an older implementation) may not accept `progress`.

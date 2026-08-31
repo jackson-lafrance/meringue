@@ -309,15 +309,21 @@ module Meringue
       end
 
       def plan_worker_workspace(project_root:, project_id:, issue_id:, agent_id:, task_title: nil, profile: nil,
-                                 repository: nil)
+                                 repository: nil, workspace_root: nil, worktree_provider: nil,
+                                 worktree_provider_command: nil, worktree_provider_fallback: nil)
         profile = resolve_provisioning_profile(project_root, profile, repository: repository)
         safe_project_name = project_slug(File.basename(File.expand_path(project_root))) || "project"
         safe_task_name = DeliveryArtifactPolicy.slug(task_title)
         workspace_name = safe_task_name
         branch = workspace_name
-        workspace_path = default_workspace_path(root_path, safe_project_name, workspace_name)
+        selected_root = File.expand_path(workspace_root || root_path)
+        selected_provider = WorktreeProvider.build(
+          kind: worktree_provider || @worktree_provider.kind,
+          command: worktree_provider_command || @worktree_provider_command
+        )
+        workspace_path = default_workspace_path(selected_root, safe_project_name, workspace_name)
         if profile&.custom_path_template?
-          expanded = profile.expand_path(root: root_path, project_slug: safe_project_name,
+          expanded = profile.expand_path(root: selected_root, project_slug: safe_project_name,
                                          task_slug: safe_task_name)
           workspace_path = expanded || workspace_path
         end
@@ -328,8 +334,11 @@ module Meringue
           "workspace_path" => workspace_path,
           "workspace_branch" => branch,
           "workspace_owner_id" => agent_id.to_s,
-          "requested_worktree_provider" => worktree_provider.kind,
-          "worktree_provider" => worktree_provider.kind,
+          "requested_worktree_provider" => selected_provider.kind,
+          "worktree_provider" => selected_provider.kind,
+          "worktree_provider_command" => selected_provider.command,
+          "worktree_provider_fallback" => worktree_provider_fallback || @worktree_provider_fallback,
+          "workspace_root" => selected_root,
           "created" => false
         }
         attach_profile_metadata(plan, profile)
@@ -361,7 +370,8 @@ module Meringue
       # seconds) while a long command is still running, so a caller can tell the user that a
       # checkout is working rather than hung.
       def allocate_worker_workspace(project_root:, project_id:, issue_id:, agent_id:, task_title: nil, progress: nil,
-                                    unavailable_paths: [], profile: nil)
+                                    unavailable_paths: [], profile: nil, workspace_root: nil, worktree_provider: nil,
+                                    worktree_provider_command: nil, worktree_provider_fallback: nil)
         plan = nil
         set_allocation_deadline!(self.class.monotonic_now + allocation_budget)
         project_path = canonical_path(project_root)
@@ -377,7 +387,11 @@ module Meringue
           agent_id: agent_id,
           task_title: task_title,
           profile: profile,
-          repository: repository
+          repository: repository,
+          workspace_root: workspace_root,
+          worktree_provider: worktree_provider,
+          worktree_provider_command: worktree_provider_command,
+          worktree_provider_fallback: worktree_provider_fallback
         )
         plan["project_root"] = project_path
         return failed_workspace(plan, ["isolated workspace unavailable: project root is not inside a git repository"], failure_kind: "version_control_backend_unavailable", recovery: RECOVERY_RESUME) unless repository
@@ -429,6 +443,14 @@ module Meringue
 
           errors.concat(Array(outcome.fetch("errors", [])))
           last_failure = outcome
+          # Reservation precedes provider and Git mutation. Release it on every failed attempt
+          # unless another owner holds the candidate, so stale failures never consume suffixes.
+          release_workspace_owner(
+            worktree_root,
+            agent_id: plan.fetch("workspace_owner_id"),
+            git_root: git_root,
+            branch: candidate_branch
+          )
           break unless outcome.fetch("retry", false)
         end
 
