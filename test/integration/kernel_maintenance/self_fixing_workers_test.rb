@@ -65,6 +65,35 @@ class SelfFixingWorkersTest < Minitest::Test
     assert_equal "Self-fix: Fix checkout", Meringue::Experiments::SelfFixingWorkers.title("title" => "Fix checkout")
   end
 
+  def test_default_classification_starts_only_the_original_task_lane
+    worker = initial_state.fetch("agents").first
+    assert_equal "original_task", Meringue::Experiments::SelfFixingWorkers.classification(worker).fetch("kind")
+    refute Meringue::Experiments::SelfFixingWorkers.repair_lane?(worker)
+  end
+
+  def test_explicit_platform_defect_starts_a_separate_repair_lane
+    state = initial_state
+    worker = state.fetch("agents").first
+    worker.fetch("harness_metadata")["failure_classification"] = {
+      "kind" => "platform_or_configuration", "reason" => "missing tool", "repair_issue_id" => "P1-I2"
+    }
+    state.fetch("issues") << {
+      "id" => "P1-I2", "project_id" => "P1", "title" => "Repair setup", "status" => "open",
+      "agent_ids" => [], "created_at" => "2026-08-16T00:00:00Z", "updated_at" => "2026-08-16T00:00:00Z"
+    }
+    @store.save(state)
+
+    results = @engine.send(:reconcile_self_fixing_workers)
+
+    assert_equal %w[continuation repair], results.map { |result| result.fetch("self_fixing_lane") }
+    assert_equal "P1-I1-W1", @spawned.fetch(0).fetch(2).fetch("follow_up_of_agent_id")
+    assert_includes @spawned.fetch(0).fetch(2).fetch("prompt"), "--- Original assignment ---"
+    assert_equal "P1-I2", @spawned.fetch(1).fetch(2).fetch("issue_id")
+    assert_equal false, @spawned.fetch(1).fetch(2).fetch("share_workspace")
+    recovery = @store.load.fetch("agents").first.fetch("harness_metadata").fetch("self_fixing_recovery")
+    assert_equal "spawned", recovery.fetch("lanes").fetch("repair").fetch("state")
+  end
+
   def test_recovery_workers_are_not_eligible_for_another_recovery
     worker = initial_state.fetch("agents").first.merge(
       "status" => "errored",

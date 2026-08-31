@@ -10,11 +10,17 @@ agent_defaults_mode = "role-specific"   # shared | role-specific | guided
 
 ## Self-fixing workers
 
-`self_fixing_workers` watches worker records that settle as `errored` or `blocked`. For each eligible worker it can claim at most one recovery attempt and start a follow-up worker on the same issue and workspace lineage. The recovery prompt asks the worker to diagnose the failure and make the smallest safe correction. A focus-preparation failure marker alone is not a worker failure, so it never starts self-fixing recovery; a separate settle failure remains eligible.
+`self_fixing_workers` watches worker records that settle as `errored` or `blocked`. For each eligible worker it claims at most one recovery attempt and starts a continuation worker on the same issue, worktree, and branch lineage. The continuation receives the full original assignment and the predecessor's recorded result, then owns completion of that assignment.
+
+Recovery uses an explicit `harness_metadata.failure_classification` record. The default is `original_task`, so no repair worker starts without durable evidence. A classification with `kind = "platform_or_configuration"` and a `repair_issue_id` starts a separate repair lane in that owning project. The classification may also include `reason`; Meringue does not infer a durable defect from a generic worker error. The repair lane gets a fresh isolated workspace, never edits the continuation worktree, and only repairs the recorded defect. The two lanes can run in parallel because the kernel claims the source once, serializes spawn operations, and records each lane separately. Local configuration repair must remain reversible; repository repairs use the normal branch and pull-request flow.
+
+The source record stores lane state under `harness_metadata.self_fixing_recovery.lanes`, with `continuation` and, when warranted, `repair` entries. Each entry has its own worker id, command id, state, and completion time.
+
+A focus-preparation failure marker alone is not a worker failure, so it never starts self-fixing recovery; a separate settle failure remains eligible.
 
 Safety is durable rather than process-local:
 
-- a source worker records the recovery claim, attempt count, outcome, and recovery worker id;
+- a source worker records the recovery claim, attempt count, and each lane's outcome and worker id;
 - concurrent reconciliation passes converge on the same claim and cannot create duplicates;
 - a recovery worker carries a source marker and is never itself eligible for another recovery;
 - the automatic budget is one attempt per source worker, including after restart;
