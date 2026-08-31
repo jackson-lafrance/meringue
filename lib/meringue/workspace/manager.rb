@@ -335,16 +335,16 @@ module Meringue
         attach_profile_metadata(plan, profile)
       end
 
-      # Resolve a clean main/master checkout that investigation-only workers may share. A normal
-      # registered checkout is discovery-only. A bare registered repository has no executable
-      # working tree of its own, so when no suitable linked checkout exists Meringue creates one
-      # deterministic, manager-owned cache under +root_path+. The cache is protected by a
-      # cross-process lock while it is created or recovered and is retained across worker pruning
-      # so later concurrent readers pay the checkout cost only once.
+      # Resolve a clean main/master checkout that investigation-only workers may
+      # share. A bare registered repository with no linked checkout gets a
+      # manager-owned cache under +root_path+, retained across pruning so readers
+      # pay the checkout cost only once. A directory that is not a Git repository
+      # at all is still a usable read-only workspace: the project root itself, with
+      # the harness enforcing read-only tools; such workers investigate and answer.
       def shared_read_only_checkout(project_root:)
         project_path = canonical_path(project_root)
         repository = repository_context(project_path)
-        return reuse_outcome(false, "project_is_not_a_git_repository") unless repository
+        return project_root_read_only_workspace(project_path) unless repository
 
         existing = discover_shared_read_only_checkout(project_path, repository)
         return existing if existing.fetch("strategy", nil) == "shared_checkout"
@@ -543,6 +543,14 @@ module Meringue
         return reuse_outcome(false, "workspace_missing") unless path && Dir.exist?(path)
 
         strategy = workspace["workspace_strategy"] || workspace["strategy"] || workspace.dig("plan", "strategy")
+        # A non-Git project's read-only workspace is the project directory itself.
+        # There is no Git state to validate — the harness enforcing read-only tools
+        # is the isolation story — so readability is the whole check.
+        if strategy == "project_root"
+          return reuse_outcome(false, "workspace_not_readable") unless File.readable?(path)
+
+          return reuse_outcome(true, "project_root_read_only_ready", workspace_path: canonical_path(path))
+        end
         if strategy == "shared_checkout"
           return reuse_outcome(false, "workspace_not_readable") unless File.readable?(path)
           return reuse_outcome(false, "workspace_is_bare_repository") if bare_repository?(path)
@@ -937,27 +945,32 @@ module Meringue
       end
 
       # Read-only capability probe used at project registration and by Doctor.
-      # A directory is not a workspace capability: only a Git repository with a
-      # usable base and a GitHub origin is accepted by the built-in backend.
+      # A project needs a Git repository with a usable base ref; a forge remote of
+      # any kind only enables pull-request delivery. The probe never fails
+      # registration on origin identity: a gitstream origin, a plain git remote, or
+      # no remote at all all register, and a non-Git directory registers for
+      # read-only investigation.
       def inspect_project(root_path)
         project_path = canonical_path(root_path)
         repository = repository_context(project_path)
-        return { "available" => false, "capabilities" => { "isolated_workspaces" => false }, "diagnostics" => ["not_a_git_repository"] } unless repository
+        unless repository
+          return { "available" => true, "backend" => "github_git", "repository_identity" => project_path,
+                   "capabilities" => { "isolated_workspaces" => false, "mutable_workspace" => false,
+                                        "shared_read_only_workspace" => true, "delivery" => false },
+                   "diagnostics" => ["not_a_git_repository"], "diagnostic_at" => Time.now.utc.iso8601 }
+        end
 
         git_root = repository.fetch("git_root")
         base = preferred_base_ref(git_root)
         remote = run_command("git", "-C", git_root, "remote", "get-url", "origin")
         remote_url = remote.fetch("stdout").to_s.strip
-        github = remote.fetch("status").success? && remote_url.match?(%r{(?:github\.com[:/])}i)
-        diagnostics = []
-        diagnostics << "github_origin_missing" unless github
-        diagnostics << "base_ref_missing" unless base
-        ready = github && !base.nil?
+        has_remote = remote.fetch("status").success? && !remote_url.empty?
+        diagnostics = [("base_ref_missing" unless base), ("forge_remote_missing" unless has_remote)].compact
         {
-          "available" => !!ready, "backend" => "github_git",
-          "repository_identity" => (github ? remote_url : git_root),
-          "capabilities" => { "isolated_workspaces" => !!ready, "mutable_workspace" => !!ready,
-                               "shared_read_only_workspace" => true, "delivery" => github },
+          "available" => true, "backend" => "github_git",
+          "repository_identity" => (has_remote ? remote_url : git_root),
+          "capabilities" => { "isolated_workspaces" => !base.nil?, "mutable_workspace" => !base.nil?,
+                               "shared_read_only_workspace" => true, "delivery" => has_remote },
           "diagnostics" => diagnostics, "diagnostic_at" => Time.now.utc.iso8601
         }
       rescue StandardError => e

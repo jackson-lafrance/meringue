@@ -163,8 +163,12 @@ class TuiSettingsOverlayTest < Minitest::Test
     @app.send(:open_settings, @state)
     2.times { send_key(TAB) }
     assert_equal "Experiments", @app.send(:settings_category)
+    # The GitHub support experiment is gone; self_fixing_workers is the boolean
+    # experiment that remains. Arrow down to it (agent_defaults_mode is a
+    # selector and sits above it).
+    send_key(DOWN) until @app.send(:selected_settings_row).fetch("id") == "experiments.self_fixing_workers"
     row = @app.send(:selected_settings_row)
-    assert_equal "experiments.github_support", row.fetch("id")
+    assert_equal "experiments.self_fixing_workers", row.fetch("id")
     assert_equal false, row.fetch("value")
 
     send_key(" ")
@@ -174,7 +178,7 @@ class TuiSettingsOverlayTest < Minitest::Test
     encoded_submission = @submitted.pop
     command = Meringue::Input::SlashCommandParser.new.parse(encoded_submission)
     assert_equal "SaveConfiguration", command.type
-    assert_equal({ "experiments.github_support" => true }, command.payload.fetch("changes"))
+    assert_equal({ "experiments.self_fixing_workers" => true }, command.payload.fetch("changes"))
     assert_equal @config.fingerprint, command.payload.fetch("base_fingerprint")
   end
 
@@ -227,7 +231,9 @@ class TuiSettingsOverlayTest < Minitest::Test
 
     detail = geometry.fetch(:detail)
     send_mouse("x" => detail.fetch(:x) + 2, "y" => detail.fetch(:y) + 1)
-    assert_equal true, @app.send(:selected_settings_row).fetch("value")
+    # The first Experiments row is the agent_defaults_mode selector; clicking
+    # it cycles the mode rather than toggling a boolean.
+    refute_equal "role-specific", @app.send(:selected_settings_row).fetch("value")
 
     before = @app.send(:settings_snapshot)
     send_mouse("x" => 0, "y" => 0)
@@ -241,7 +247,7 @@ class TuiSettingsOverlayTest < Minitest::Test
     assert_equal "SaveConfiguration", command.type
   end
 
-  def test_disabled_github_support_hides_pr_markers_hints_picker_and_opening_actions
+  def test_pr_markers_hints_picker_and_opening_actions_are_available_by_default
     opener = RecordingPullRequestOpener.new
     @app = Meringue::TUI::App.new(layout: @layout, config: @config, pull_request_opener: opener)
     url = "https://github.com/acme/app/pull/8"
@@ -250,16 +256,10 @@ class TuiSettingsOverlayTest < Minitest::Test
     @state["agents"] << agent_record("P1-I1-W1", "project_id" => "P1", "issue_id" => "P1-I1")
 
     frame = @app.render(compose, width: 100, height: 30, color: false)
-    refute_includes frame, "PR #8"
-    refute_includes frame, "open PR"
-    refute_includes @app.send(:workspace_leader_commands).map { |command| command.fetch("action") }, "workspace_open_pull_request"
+    assert_includes frame, "open PR"
+    assert_includes @app.send(:workspace_leader_commands).map { |command| command.fetch("action") }, "workspace_open_pull_request"
 
     assert @app.send(:handle_local_pull_requests_command, @state)
-    assert_empty opener.urls
-    message = @app.instance_variable_get(:@messages).last.fetch("text")
-    assert_includes message, "Settings → Experiments"
-    refute @app.send(:open_delivery_pr_for_id, @state, "P1-I1-W1")
-    assert_empty opener.urls
   end
 
   def test_advanced_rows_are_collapsed_but_every_config_schema_row_is_reachable_once

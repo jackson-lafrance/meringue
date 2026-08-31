@@ -159,8 +159,6 @@ module Meringue
 
       def workspace_action_prefix(key)
         WORKSPACE_COMMAND_ACTIONS.each do |action|
-          next if action == "workspace_open_pull_request" && !github_support_enabled?
-
           remainder = keybindings.consume_prefix(action, key)
           return [action, remainder] if remainder
         end
@@ -178,11 +176,6 @@ module Meringue
         when "workspace_open_editor"
           open_agent_workspace_editor(state)
         when "workspace_open_pull_request"
-          unless github_support_enabled?(state)
-            @agent_workspace_notice = nil
-            @agent_workspace_error = github_support_disabled_message
-            return :handled
-          end
           if open_workspace_delivery_pr(state)
             @agent_workspace_notice = "Opened the verified delivery pull request."
             @agent_workspace_error = nil
@@ -244,12 +237,7 @@ module Meringue
       end
 
       def workspace_command_suggestion_records(input_buffer)
-        records = WorkspaceCommands.command_suggestion_records(input_buffer)
-        return records if github_support_enabled?
-
-        records.reject do |record|
-          record.fetch("action", nil) == "workspace_open_pull_request" || record.fetch("completion", nil) == "/pr"
-        end
+        WorkspaceCommands.command_suggestion_records(input_buffer)
       end
 
       def run_workspace_slash_command(input_buffer, state)
@@ -266,7 +254,6 @@ module Meringue
         when "workspace_help"
           @agent_workspace_error = nil
           help_lines = WorkspaceCommands.help_lines
-          help_lines = help_lines.reject { |line| line.start_with?("/pr ") } unless github_support_enabled?(state)
           @agent_workspace_notice = "Workspace commands: #{help_lines.join(" · ")}"
         when "workspace_filter"
           arguments.empty? ? cycle_agent_workspace_filter : set_agent_workspace_filter(arguments.first)
@@ -322,7 +309,6 @@ module Meringue
       # harness-agnostic so every backend reads correctly.
       def workspace_leader_commands
         WORKSPACE_COMMAND_ACTIONS.filter_map do |action|
-          next if action == "workspace_open_pull_request" && !github_support_enabled?
           key = keybindings.display_name_for(action)
           next unless key
 

@@ -179,13 +179,11 @@ module Meringue
       end
 
       def extract_linked_pull_request_urls(text)
-        extract_pull_request_urls(text).map { |url| canonical_pull_request_url(url) }.uniq
+        extract_pull_request_urls(text).map { |url| Forge.canonical_pull_request_url(url) }.uniq
       end
 
       def canonical_pull_request_url(url)
-        cleaned = url.to_s.sub(/[.,;:]+\z/, "")
-        match = cleaned.match(%r{\A(https?://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/\d+)})
-        match ? match[1] : cleaned
+        Forge.canonical_pull_request_url(url)
       end
 
       def serializable_text(value)

@@ -4,6 +4,10 @@ Mutable workers always run in an isolated workspace. The built-in `github_git`
 backend uses Git worktrees and requires a GitHub origin and usable base ref.
 There is deliberately no fallback to the registered project directory.
 
+The git backend is one of the two axes in the Alternate backend section; the
+other, the code-hosting frontend that answers pull-request questions, is
+independent and documented in [`forge-frontends.md`](forge-frontends.md).
+
 Applications embedding Meringue may supply a backend object implementing:
 
 ```ruby

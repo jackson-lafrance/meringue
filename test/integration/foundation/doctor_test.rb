@@ -103,18 +103,18 @@ class FoundationDoctorTest < Minitest::Test
     end
   end
 
-  # gh only matters when the experiment that shells out to it is on.
-  def test_the_github_cli_is_only_checked_when_github_support_is_enabled
+  # gh only matters when the built-in GitHub frontend is the one in use.
+  def test_the_github_cli_is_only_checked_when_the_github_frontend_is_active
     in_repository do |root|
-      off = build(root: root, config: config_with("harness" => { "head_provider" => "pi", "worker_provider" => "pi" }), harness: "pi")
-      refute(titles(off).any? { |title| title.include?("GitHub") })
+      default = build(root: root, config: config_with("harness" => { "head_provider" => "pi", "worker_provider" => "pi" }), harness: "pi")
+      assert(titles(default).any? { |title| title.include?("GitHub") })
 
-      on = build(
+      alternate = build(
         root: root,
-        config: config_with("harness" => { "head_provider" => "pi", "worker_provider" => "pi" }, "experiments" => { "github_support" => true }),
+        config: config_with("harness" => { "head_provider" => "pi", "worker_provider" => "pi" }, "forge" => { "frontend" => "command" }),
         harness: "pi"
       )
-      assert(titles(on).any? { |title| title.include?("GitHub") })
+      refute(titles(alternate).any? { |title| title.include?("GitHub") })
     end
   end
 

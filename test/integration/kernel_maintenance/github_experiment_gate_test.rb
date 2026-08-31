@@ -3,6 +3,12 @@
 require "test_helper"
 require "tmpdir"
 
+# GitHub support is default behavior, not an experiment. Pull-request/forge
+# support is always active: a frontend is always configured (the default is the
+# built-in GitHub frontend), so reconciliation, worker completion, and prune all
+# consult the forge, and prune is always accepted. The only thing that changes
+# with the frontend axis is whether heads receive GitHub-specific `gh` guidance:
+# the built-in GitHub frontend includes it, an alternate frontend does not.
 class KernelMaintenanceGithubExperimentGateTest < Minitest::Test
   class CountingForge
     attr_reader :status_calls, :branch_calls
@@ -10,6 +16,14 @@ class KernelMaintenanceGithubExperimentGateTest < Minitest::Test
     def initialize
       @status_calls = []
       @branch_calls = []
+    end
+
+    def id
+      "github"
+    end
+
+    def repository_from_remote(remote)
+      Meringue::Forge::GitHubClient.repository_from_remote(remote)
     end
 
     def pull_request_status(url, timeout: nil)
@@ -38,9 +52,7 @@ class KernelMaintenanceGithubExperimentGateTest < Minitest::Test
     @config_path = File.join(@dir, "config.toml")
     File.write(@config_path, <<~TOML)
       [settings]
-      schema_version = 1
-      [experiments]
-      github_support = false
+      schema_version = 3
     TOML
     @state_path = File.join(@dir, "state.json")
     @store = Meringue::State::Store.new(path: @state_path)
@@ -58,9 +70,9 @@ class KernelMaintenanceGithubExperimentGateTest < Minitest::Test
     FileUtils.remove_entry(@dir) if File.exist?(@dir)
   end
 
-  def test_disabled_mode_never_calls_forge_during_status_reconcile_completion_or_prune
+  def test_forge_support_is_active_by_default_and_consults_the_forge
     status = @engine.send(:pull_request_status, PR_URL)
-    assert_equal "unknown", status.fetch("state")
+    assert_equal "open", status.fetch("state")
 
     @engine.apply("type" => "ReconcileSessions", "payload" => {})
     completion = @engine.send(:record_worker_completion,
@@ -71,47 +83,34 @@ class KernelMaintenanceGithubExperimentGateTest < Minitest::Test
     prune = @engine.apply("type" => "Prune", "payload" => {})
 
     assert_equal "accepted", completion.fetch("status")
-    assert_equal "rejected", prune.fetch("status")
-    assert_empty @forge.status_calls
-    assert_empty @forge.branch_calls
+    assert_equal "accepted", prune.fetch("status")
+    refute_empty @forge.status_calls
     issue = @store.load.fetch("issues").find { |record| record["id"] == "P1-I1" }
     assert_equal [PR_URL], issue.fetch("delivery_pull_requests").map { |record| record.fetch("url") }
-    refute issue.key?("candidate_pr_urls"), "disabled completion must not extract new candidate metadata"
-    assert_includes prune.fetch("message"), "GitHub support is disabled"
-    assert_includes prune.fetch("message"), "Settings → Experiments"
   end
 
-  def test_disabled_mode_does_not_associate_request_urls
-    head = {
-      "harness_metadata" => { "user_message" => "Please review #{PR_URL}" }
-    }
-    result = {
-      "status" => "accepted",
-      "command_type" => "ModifyIssue",
-      "target_id" => "P1-I1"
-    }
+  def test_request_urls_are_associated_by_default
+    head = { "harness_metadata" => { "user_message" => "Please review #{PR_URL}" } }
+    result = { "status" => "accepted", "command_type" => "ModifyIssue", "target_id" => "P1-I1" }
 
-    assert_empty @engine.send(:associate_head_request_pull_requests!, head, result)
+    @engine.send(:associate_head_request_pull_requests!, head, result)
     assert_equal 1, @store.load.fetch("issues").first.fetch("delivery_pull_requests").length
   end
 
-  def test_reenabling_applies_live_to_the_next_lookup
-    store = Meringue::Config::Store.new(path: @config_path)
-    result = @engine.apply(
-      "type" => "SaveConfiguration",
-      "payload" => {
-        "base_fingerprint" => store.fingerprint,
-        "changes" => { "experiments.github_support" => true }
-      }
+  def test_head_context_includes_gh_tools_when_the_github_frontend_is_active
+    context = Meringue::Heads::Context.new(
+      head_id: "H1",
+      user_message: "work on a linked issue",
+      snapshot: @store.load,
+      github_support: true
     )
-    assert_equal "accepted", result.fetch("status")
+    prompt = context.system_prompt
 
-    status = @engine.send(:pull_request_status, PR_URL)
-    assert_equal "open", status.fetch("state")
-    assert_equal 1, @forge.status_calls.length
+    assert_match(/\bgh\s+(?:issue|pr)\b/i, prompt)
+    assert_match(/github/i, prompt)
   end
 
-  def test_disabled_head_context_omits_gh_tools_and_exact_title_rules
+  def test_head_context_omits_gh_tools_when_an_alternate_frontend_is_active
     context = Meringue::Heads::Context.new(
       head_id: "H1",
       user_message: "work on a linked issue",
@@ -124,6 +123,29 @@ class KernelMaintenanceGithubExperimentGateTest < Minitest::Test
     refute_match(/\bgh\s+(?:issue|pr)\b/i, prompt)
     refute_match(/github/i, prompt)
     refute_match(/github/i, serialized)
+  end
+
+  def test_alternate_frontend_config_keeps_forge_support_active
+    config_path = File.join(@dir, "alternate.toml")
+    File.write(config_path, <<~TOML)
+      [settings]
+      schema_version = 3
+      [forge]
+      frontend = "command"
+      command = ["/opt/private-frontend-adapter"]
+    TOML
+    engine = Meringue::Kernel::Engine.new(
+      store: @store,
+      config: Meringue::Config.load(path: config_path),
+      config_path: config_path,
+      forge_client: @forge
+    )
+
+    assert_equal false, Meringue::Forge.github_frontend?(engine.instance_variable_get(:@config))
+    # PR support is still active: the forge is still consulted.
+    status = engine.send(:pull_request_status, PR_URL)
+    assert_equal "open", status.fetch("state")
+    assert_equal 1, @forge.status_calls.length
   end
 
   private

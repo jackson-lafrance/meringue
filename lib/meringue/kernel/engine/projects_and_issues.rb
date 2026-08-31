@@ -19,11 +19,13 @@ module Meringue
         return rejected_result(command_id, command_type, "Project was not added.", errors) unless errors.empty?
 
         capability = @version_control_backend.inspect_project(root_path: expanded_path)
-        unless capability.is_a?(Hash) && capability["available"] == true && capability.dig("capabilities", "isolated_workspaces") == true
+        unless capability.is_a?(Hash) && capability["available"] == true
           diagnostics = Array(capability.is_a?(Hash) ? capability["diagnostics"] : nil).join(", ")
-          reason = diagnostics.empty? ? "isolated_workspace_capability_missing" : diagnostics
-          return rejected_result(command_id, command_type, "Project was not added: isolated mutable workspaces are unavailable (#{reason}).", ["version_control_backend_unavailable", reason])
+          reason = diagnostics.empty? ? "version_control_probe_failed" : diagnostics
+          return rejected_result(command_id, command_type, "Project was not added: its directory could not be probed (#{reason}).", ["version_control_probe_failed", reason])
         end
+
+        isolated = capability.dig("capabilities", "isolated_workspaces") == true
 
         state = normalized_state
         requested_name = project_display_name(name)
@@ -96,6 +98,7 @@ module Meringue
           "version_control_backend" => capability.fetch("backend", @version_control_backend.id),
           "version_control_repository_identity" => capability["repository_identity"],
           "version_control_capabilities" => capability.fetch("capabilities", {}),
+          "version_control_diagnostics" => Array(capability["diagnostics"]),
           "version_control_diagnostic_at" => capability["diagnostic_at"],
           "status" => "working",
           "created_at" => now,
@@ -112,7 +115,7 @@ module Meringue
           details: {
             "root_path" => expanded_path,
             "version_control_backend" => project.fetch("version_control_backend"),
-            "isolated_mutable_workspaces" => true,
+            "isolated_mutable_workspaces" => isolated,
             "projects_sharing_root_path" => projects_at_path.length + 1
           }
         )
@@ -162,6 +165,11 @@ module Meringue
       def version_control_probe_due?(project)
         return false unless project.is_a?(Hash)
         return false if project.dig("version_control_capabilities", "isolated_workspaces") == true
+        # A directory that is not a Git repository is conclusively degraded for
+        # mutable work; re-probing it every minute only churns state. Re-register
+        # the project after it becomes a Git repository rather than polling for it.
+        diagnostics = project["version_control_diagnostics"]
+        return false if diagnostics.is_a?(Array) && diagnostics.include?("not_a_git_repository")
 
         probed_at = parse_time_or_nil(project["version_control_diagnostic_at"])
         return true if probed_at.nil?
@@ -181,6 +189,7 @@ module Meringue
         project["version_control_backend"] = capability.fetch("backend", @version_control_backend.id)
         project["version_control_repository_identity"] = capability["repository_identity"]
         project["version_control_capabilities"] = capabilities
+        project["version_control_diagnostics"] = Array(capability["diagnostics"])
         project["version_control_diagnostic_at"] = capability["diagnostic_at"] || now
         is_isolated = capabilities["isolated_workspaces"] == true
         return { "status" => "recorded", "project_id" => project_id, "isolated" => is_isolated, "log_entry_ids" => [] } unless is_isolated && !was_isolated

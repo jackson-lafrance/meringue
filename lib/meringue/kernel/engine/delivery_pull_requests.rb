@@ -20,7 +20,6 @@ module Meringue
       # (submitting a prompt, applying a HeadResult, settling a worker) for the length of the
       # whole burst.
       def refresh_stale_delivery_pull_requests
-        return [] unless github_support_enabled?
         # Capped so a long backlog costs several cheap ticks instead of one long stall.
         due_urls = due_delivery_pull_request_urls.first(DELIVERY_PULL_REQUEST_REFRESH_BATCH_LIMIT)
         return [] if due_urls.empty?
@@ -140,8 +139,6 @@ module Meringue
       end
 
       def refresh_worker_delivery_pull_requests!(state)
-        return [] unless github_support_enabled?(state)
-
         workers_by_issue = worker_agents_by_issue(state)
         state.fetch("issues").flat_map do |issue|
           workers = workers_by_issue.fetch(issue.fetch("id", nil), [])
@@ -325,12 +322,10 @@ module Meringue
       end
 
       def verified_worker_pull_requests(agent:, project:, candidate_urls:)
-        return [] unless github_support_enabled?
-
         branch = worker_delivery_branch(agent)
         return [] if blank?(branch)
 
-        project_repository = project && project_github_repository(project)
+        project_repository = project && project_forge_repository(project)
         return [] if blank?(project_repository)
 
         Array(candidate_urls).filter_map do |url|
@@ -348,15 +343,23 @@ module Meringue
       end
 
       def verified_worker_pull_request?(status, branch:, project_repository:)
-        status.fetch("provider", nil) == "github" &&
-          status.fetch("base_repository", nil).to_s.downcase == project_repository.to_s.downcase &&
-          !status.fetch("is_cross_repository", false) &&
-          status.fetch("head_repository", nil).to_s.downcase == project_repository.to_s.downcase &&
-          normalized_branch_name(status.fetch("head_branch", nil)) == normalized_branch_name(branch)
+        # Branch match is the strong signal. Repository identity is checked when the
+        # frontend reports it; a command frontend that omits base/head repository is
+        # trusted on branch match because Meringue queried it with the project's own
+        # forge handle. Cross-repository PRs (forks) are never accepted.
+        return false unless normalized_branch_name(status.fetch("head_branch", nil)) == normalized_branch_name(branch)
+        return false if status.fetch("is_cross_repository", false)
+        repository_identity_matches?(status, project_repository)
+      end
+
+      def repository_identity_matches?(status, project_repository)
+        [status.fetch("base_repository", nil), status.fetch("head_repository", nil)].all? do |reported|
+          next true if blank?(reported)
+          !blank?(project_repository) && reported.to_s.downcase == project_repository.to_s.downcase
+        end
       end
 
       def discovered_worker_candidate_pr_urls(agent:, project:, issue: nil)
-        return [] unless github_support_enabled?
         # A worker can settle without usable final output, so recover from the durable branch
         # identity rather than treating arbitrary URLs elsewhere in its session as deliveries.
         return [] unless agent.fetch("status", nil) == "completed"
@@ -365,7 +368,7 @@ module Meringue
         branch = normalized_branch_name(persisted_worker_delivery_branch(agent))
         return [] if blank?(branch)
 
-        repository = project_github_repository(project)
+        repository = project_forge_repository(project)
         return [] if blank?(repository)
         # A merged delivery pull request is already recorded for this exact branch, so discovery can
         # only re-derive URLs Meringue already has. Skipping it stops a slow or unreachable forge
@@ -395,15 +398,14 @@ module Meringue
         return nil unless Array(candidate_urls).compact.uniq.length == 1
         return nil if persisted_worker_delivery_branch(agent)
 
-        project_repository = project && project_github_repository(project)
+        project_repository = project && project_forge_repository(project)
         return nil if blank?(project_repository)
 
         status = pull_request_status(Array(candidate_urls).first)
-        return nil unless status.fetch("provider", nil) == "github"
         return nil unless status.fetch("state", nil) == "merged"
-        return nil unless status.fetch("base_repository", nil).to_s.downcase == project_repository.to_s.downcase
+        return nil unless status.fetch("provider", nil) == forge_provider_id
         return nil if status.fetch("is_cross_repository", false)
-        return nil unless status.fetch("head_repository", nil).to_s.downcase == project_repository.to_s.downcase
+        return nil unless repository_identity_matches?(status, project_repository)
 
         status.merge(
           "matched_by" => "merged_same_repo_candidate_without_branch",
@@ -453,27 +455,32 @@ module Meringue
         value.sub(/\Arefs\/heads\//, "").sub(/\Aorigin\//, "")
       end
 
-      def project_github_repository(project)
+      def project_forge_repository(project)
         root_path = project.fetch("root_path", nil)
         return nil if blank?(root_path) || !Dir.exist?(root_path.to_s)
 
         stdout, _stderr, status = Open3.capture3("git", "-C", root_path.to_s, "remote", "get-url", "origin")
         return nil unless status.success?
 
-        github_repository_from_remote(stdout)
+        forge_repository_from_remote(stdout)
       rescue StandardError
         nil
       end
 
-      def github_repository_from_remote(remote)
-        text = remote.to_s.strip.sub(/\.git\z/, "")
-        match = text.match(%r{github\.com[:/]([^/]+/[^/]+)\z})
-        match && match[1]
+      def forge_repository_from_remote(remote)
+        resolver = forge_client.respond_to?(:repository_from_remote) ? forge_client : Forge::GitHubClient
+        handle = resolver.repository_from_remote(remote)
+        present_string(handle)
+      end
+
+      # The frontend's own id ("github", "command"), so a merged candidate is only
+      # accepted from the active frontend rather than from a stale answer a
+      # different frontend might have recorded.
+      def forge_provider_id
+        forge_client.respond_to?(:id) ? forge_client.id : nil
       end
 
       def pull_request_urls_for_branch(repository:, branch:)
-        return [] unless github_support_enabled?
-
         context = prune_forge_lookup_context
         return Array(forge_client.pull_request_urls_for_branch(repository: repository, branch: branch)) unless context
 
@@ -503,13 +510,6 @@ module Meringue
 
       def pull_request_status(url)
         context = prune_forge_lookup_context
-        unless github_support_enabled?
-          trusted = context&.dig("status_by_url", url.to_s)
-          return trusted if trusted
-
-          return unavailable_prune_pull_request_status(url, "GitHub support is disabled; enable it in Settings → Experiments")
-        end
-
         return forge_client.pull_request_status(url) unless context
 
         key = url.to_s
@@ -610,21 +610,21 @@ module Meringue
         )
       end
 
-      def github_support_enabled?(state = nil)
-        explicit = config.value("experiments", "github_support")
-        return explicit if explicit == true || explicit == false
+      # Pull-request/forge support is always active: a frontend is always configured
+      # (the default is the built-in GitHub frontend). Per-project degradation handles
+      # the rest — a project with no forge remote simply tracks no PRs — so there is
+      # no config-level off switch to gate on.
+      def forge_support_active?(state = nil)
+        _ = state
+        true
+      end
 
-        # Callers that bypass CLI migration (older embedders and persisted test
-        # fixtures) retain pre-experiment behavior. Normal launches always record
-        # schema version 1 before an empty state file can be created.
-        return true if config.value("settings", "schema_version").to_i < Config::Schema::VERSION
-
-        source = state
-        return false unless source.is_a?(Hash)
-
-        Array(source.fetch("issues", [])).any? do |issue|
-          State::Models.pull_request_records_from(issue).any?
-        end
+      # Whether the built-in GitHub frontend is the active one. GitHub-specific head
+      # guidance and the gh CLI doctor check key off this; an alternate frontend gets
+      # its own guidance from its adapter instead.
+      def github_frontend?(state = nil)
+        _ = state
+        Forge.github_frontend?(config)
       end
 
       def unavailable_prune_pull_request_status(url, error)

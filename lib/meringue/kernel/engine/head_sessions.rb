@@ -594,6 +594,7 @@ module Meringue
           "version_control_backend" => capability.fetch("backend", @version_control_backend.id),
           "version_control_repository_identity" => capability["repository_identity"],
           "version_control_capabilities" => capability.fetch("capabilities", {}),
+          "version_control_diagnostics" => Array(capability["diagnostics"]),
           "version_control_diagnostic_at" => capability["diagnostic_at"],
           "status" => "working",
           "portable_import" => {

@@ -717,7 +717,6 @@ module Meringue
       # unverified delivery records. The normal refresh path can enrich their lifecycle state, and
       # the worker-completion path can merge branch/repository verification into the same URL.
       def associate_head_request_pull_requests!(head, command_result)
-        return [] unless github_support_enabled?
         return [] unless head.is_a?(Hash)
         return [] unless command_result.is_a?(Hash) && command_result.fetch("status", nil) == "accepted"
         return [] unless PULL_REQUEST_ASSOCIATING_COMMANDS.include?(command_result.fetch("command_type", nil).to_s)

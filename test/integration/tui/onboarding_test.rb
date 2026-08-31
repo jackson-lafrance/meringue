@@ -106,14 +106,17 @@ class TuiTransactionalSetupTest < Minitest::Test
     assert_equal "[settings]\nschema_version = 1\n", File.read(@config_path)
     assert_empty submitted
 
-    send_key(TAB) # Version control
-    assert_equal "Version control", setup_snapshot.fetch("category")
+    send_key(TAB) # Alternate backend
+    assert_equal "Alternate backend", setup_snapshot.fetch("category")
     send_key(TAB) # Experiments
     assert_equal "Experiments", setup_snapshot.fetch("category")
-    expected_experiments = Meringue::Experiments::Registry.setting_ids - ["experiments.github_support_test_access"]
+    expected_experiments = Meringue::Experiments::Registry.setting_ids
     assert_equal expected_experiments, setup_rows.map { |row| row.fetch("id") }
-    send_key(ENTER) # checkbox-style controls use Enter
-    assert @app.instance_variable_get(:@settings_draft).value("experiments.github_support")
+    rows = setup_rows
+    target_index = rows.index { |row| row.fetch("id") == "experiments.self_fixing_workers" }
+    @app.instance_variable_set(:@settings_row_index, target_index)
+    send_key(ENTER)
+    assert_equal true, @app.instance_variable_get(:@settings_draft).value("experiments.self_fixing_workers")
 
     send_key(TAB) # Done
     assert_equal "Done", setup_snapshot.fetch("category")
@@ -127,7 +130,7 @@ class TuiTransactionalSetupTest < Minitest::Test
     assert_equal preview, changes.fetch("appearance.theme")
     assert_equal head_harness, changes.fetch("agent.head_harness")
     assert_equal head_harness, changes.fetch("agent.worker_harness")
-    assert_equal true, changes.fetch("experiments.github_support")
+    assert_equal true, changes.fetch("experiments.self_fixing_workers")
     assert @app.instance_variable_get(:@settings_saving)
   end
 
@@ -250,7 +253,6 @@ class TuiTransactionalSetupTest < Minitest::Test
     assert_equal "skipped", command.payload.fetch("onboarding_outcome")
     assert_equal(
       {
-        "experiments.github_support" => false,
         "experiments.agent_defaults_mode" => "role-specific",
         "experiments.self_fixing_workers" => false
       },
@@ -272,7 +274,7 @@ class TuiTransactionalSetupTest < Minitest::Test
     saved = Meringue::Config.load(path: @config_path)
     assert_equal Meringue::Config::ONBOARDING_VERSION, saved.onboarding_version
     assert_equal "completed", saved.onboarding_outcome
-    assert_equal false, saved.value("experiments", "github_support")
+    assert_nil saved.value("experiments", "github_support")
     assert_includes messages_text, "Setup complete"
     assert_includes messages_text, "Head:"
     assert_includes messages_text, "Worker:"
@@ -332,13 +334,12 @@ class TuiTransactionalSetupTest < Minitest::Test
   # The booleans still read as switches.
   def test_the_completion_card_still_reports_switches_as_on_and_off
     config = Meringue::Config.new(
-      { "harness" => { "provider" => "pi" }, "experiments" => { "github_support" => true } },
+      { "harness" => { "provider" => "pi" }, "experiments" => { "self_fixing_workers" => false } },
       path: "/nonexistent/config.toml"
     )
 
     card = Meringue::TUI::Onboarding.completion_card(config)
 
-    assert_includes card, "GitHub support on"
     assert_includes card, "Self-fixing workers off"
   end
 

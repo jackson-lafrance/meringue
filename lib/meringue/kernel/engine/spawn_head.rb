@@ -221,7 +221,7 @@ module Meringue
             takeover_context: takeover_context,
             cwd: cwd,
             state_path: store.path,
-            github_support: github_support_enabled?(snapshot),
+            github_support: github_frontend?(snapshot),
             worker_spawning_guidance: worker_spawning_guidance_enabled?,
             worker_spawning_guidance_prompt: worker_spawning_guidance_prompt
           )

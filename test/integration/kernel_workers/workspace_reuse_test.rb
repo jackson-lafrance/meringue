@@ -376,14 +376,14 @@ class KernelWorkersWorkspaceReuseTest < Minitest::Test
   # There is no such worker any more: a project whose root cannot host an isolated
   # worktree never gets registered, so no predecessor can be sitting in a project root
   # with nothing to share.
-  def test_a_project_root_that_cannot_host_a_worktree_is_refused_at_registration
+  def test_a_non_git_project_root_registers_with_degraded_capabilities
     engine = build_engine
     root = create_plain_directory
 
     result = apply_raw(engine, "AddProject", { "path" => root, "name" => "Plain" })
 
-    assert_equal "rejected", result.fetch("status")
-    assert_includes result.fetch("errors"), "version_control_backend_unavailable"
+    assert_equal "accepted", result.fetch("status")
+    assert_equal false, result.fetch("result").fetch("version_control_capabilities").fetch("isolated_workspaces")
   end
 
   # --- refusals: git ----------------------------------------------------------------------------

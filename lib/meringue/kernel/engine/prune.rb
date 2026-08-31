@@ -20,13 +20,6 @@ module Meringue
             receipt.fetch("details", {}), [receipt.fetch("id")]
           )
         end
-        unless synchronized_state { github_support_enabled?(normalized_state) }
-          return rejected_result(
-            command_id, command_type,
-            "Prune is inactive because GitHub support is disabled; no records were removed. Enable it in Settings → Experiments to prune resolved records.",
-            ["github_support_disabled"]
-          )
-        end
         started_at = monotonic_time
         # Forge I/O and git worktree cleanup are both unbounded from the state layer's point of
         # view. Neither may run while the shared state lock is held: reconciliation and later TUI
@@ -158,11 +151,6 @@ module Meringue
         snapshot = synchronized_state { deep_copy(normalized_state) }
         context = new_prune_forge_lookup_context
         seed_trusted_prune_pull_request_statuses!(context, snapshot)
-        unless github_support_enabled?(snapshot)
-          context["allow_external"] = false
-          context["github_support_disabled"] = true
-          return context
-        end
         with_prune_forge_lookup_context(context) do
           # These are the only prune phases that can consult the forge, and they share one bounded
           # budget, so they run in the order retention actually depends on:
@@ -743,10 +731,6 @@ module Meringue
 
       def prune_forge_lookup_clause(forge_lookup)
         return "" unless forge_lookup.is_a?(Hash)
-        if forge_lookup.fetch("github_support_disabled", false)
-          return " (GitHub support is disabled; re-enable it in Settings → Experiments to refresh pull request status)"
-        end
-
         if forge_lookup.fetch("budget_exhausted", false)
           " (the #{format_seconds(forge_lookup.fetch("budget_seconds", prune_forge_lookup_budget))}s forge lookup " \
             "budget was exhausted)"
@@ -798,7 +782,6 @@ module Meringue
           "elapsed_seconds" => (monotonic_time - started_at).round(3),
           "remaining_seconds" => prune_forge_lookup_remaining(context).round(3),
           "budget_exhausted" => context.fetch("budget_exhausted", false),
-          "github_support_disabled" => context.fetch("github_support_disabled", false),
           "status_lookup_count" => context.fetch("external_status_urls", []).length,
           "branch_lookup_count" => context.fetch("external_branch_lookups", []).length,
           "trusted_from_state_urls" => context.fetch("trusted_status_urls", []).uniq,

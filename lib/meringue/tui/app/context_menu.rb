@@ -32,7 +32,7 @@ module Meringue
 
       def open_context_menu(state, target_id, x:, y:)
         kind = ContextMenu.kind_for(state, target_id)
-        entries = ContextMenu.entries(state, target_id, github_enabled: github_support_enabled?(state)).map(&:to_h)
+        entries = ContextMenu.entries(state, target_id, github_enabled: forge_support_active?(state)).map(&:to_h)
         return false if entries.empty?
 
         close_model_picker

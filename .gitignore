@@ -4,3 +4,4 @@ Gemfile.lock
 # `meringue demo` locks its state fixture in place, which left an untracked
 # file in the checkout - and /update refuses to run against a dirty tree.
 fixtures/*.lock
+.pi-precognition/

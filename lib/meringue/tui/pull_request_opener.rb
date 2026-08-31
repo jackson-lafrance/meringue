@@ -17,7 +17,7 @@ module Meringue
 
       def open(url)
         return rejected("Agent has no pull request URL to open.") unless present?(url)
-        return rejected("Pull request URL is not a supported GitHub PR URL: #{url}") unless pull_request_url?(url)
+        return rejected("Pull request URL is not a supported pull-request link: #{url}") unless pull_request_url?(url)
 
         argv = opener_argv
         return failed("Could not open pull request because no URL opener is configured. Set MERINGUE_PR_OPEN_COMMAND, or install xdg-open/open.") if argv.empty?
@@ -68,7 +68,7 @@ module Meringue
       end
 
       def pull_request_url?(url)
-        url.to_s.match?(%r{\Ahttps?://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/\d+(?:[/?#].*)?\z})
+        Forge.pull_request_url?(url)
       end
 
       def present?(value)

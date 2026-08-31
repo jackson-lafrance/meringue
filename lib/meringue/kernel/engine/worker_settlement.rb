@@ -137,13 +137,10 @@ module Meringue
           update_issue_status_from_workers!(state, issue, now) if issue
           update_project_status_from_issues!(state, project, now) if project
 
-          github_enabled = github_support_enabled?(state)
-          candidate_pr_urls = github_enabled ? worker_pr_urls(last_assistant_text: last_assistant_text, harness_events: harness_events) : []
-          if github_enabled
-            State::Models.scrub_worker_pull_request_keys!(agent["harness_metadata"])
-            delivery_pull_request = verified_worker_pull_request(agent: agent, project: project, candidate_urls: candidate_pr_urls)
-            attach_issue_pull_requests!(issue, delivery_pull_request, candidate_pr_urls) if issue
-          end
+          candidate_pr_urls = worker_pr_urls(last_assistant_text: last_assistant_text, harness_events: harness_events)
+          State::Models.scrub_worker_pull_request_keys!(agent["harness_metadata"])
+          delivery_pull_request = verified_worker_pull_request(agent: agent, project: project, candidate_urls: candidate_pr_urls)
+          attach_issue_pull_requests!(issue, delivery_pull_request, candidate_pr_urls) if issue
 
           completion_details = {
             "issue_id" => agent.fetch("issue_id", nil),

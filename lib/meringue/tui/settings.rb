@@ -20,7 +20,11 @@ module Meringue
         WELCOME = "Welcome"
         HARNESS = "Harness"
         THEME = "Theme"
-        VERSION_CONTROL = "Version control"
+        # One step for both pluggable axes: the git backend that provisions
+        # isolated workspaces, and the code-hosting frontend that answers
+        # pull-request questions. Both default to the built-in GitHub-backed
+        # pair, so the step is mostly a confirmation; alternates plug in here.
+        ALTERNATE_BACKEND = "Alternate backend"
         # The step id stays the schema category it draws from; only the heading
         # reads "Meringue Xtras".
         EXPERIMENTS = "Experiments"
@@ -32,13 +36,13 @@ module Meringue
         # applied to both roles; splitting them is what /config is for. Welcome
         # and Done carry no controls at all: a first run should open and close
         # with something to read, not a form.
-        STEPS = [WELCOME, HARNESS, THEME, VERSION_CONTROL, EXPERIMENTS, DONE].freeze
+        STEPS = [WELCOME, HARNESS, THEME, ALTERNATE_BACKEND, EXPERIMENTS, DONE].freeze
         NARRATIVE_STEPS = [WELCOME, DONE].freeze
 
         FIXED_SETTING_IDS = {
           HARNESS => %w[agent.head_harness workspace.editor].freeze,
           THEME => %w[appearance.theme appearance.animations].freeze,
-          VERSION_CONTROL => %w[version_control.backend version_control.command].freeze,
+          ALTERNATE_BACKEND => %w[version_control.backend version_control.command forge.frontend forge.command forge.test_github_access].freeze,
         }.freeze
 
         # Model and reasoning are not asked during a first run at all. Every

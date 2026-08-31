@@ -228,6 +228,27 @@ module Meringue
           same_path?(owner.fetch("worktree_root", ""), worktree_root)
       end
 
+      # The read-only workspace for a project that is not a Git repository: the project
+      # directory itself. Same shape as a shared checkout so the engine treats it uniformly,
+      # but with no branch or git root to report and a distinct workspace strategy so
+      # validation and delivery know there is no branch to verify against.
+      def project_root_read_only_workspace(project_path)
+        return reuse_outcome(false, "project_root_not_readable") unless Dir.exist?(project_path) && File.readable?(project_path)
+
+        {
+          "strategy" => "project_root",
+          "workspace_strategy" => "project_root",
+          "project_root" => project_path,
+          "workspace_path" => canonical_path(project_path),
+          "workspace_root_path" => project_path,
+          "worktree_root_path" => project_path,
+          "workspace_branch" => nil,
+          "created" => false,
+          "read_only" => true,
+          "errors" => []
+        }
+      end
+
       def shared_checkout_record(project_path:, git_root:, relative_project_path:, checkout_root:, branch:, managed:, created:)
         workspace_path = relative_project_path == "." ? checkout_root : File.join(checkout_root, relative_project_path)
         {

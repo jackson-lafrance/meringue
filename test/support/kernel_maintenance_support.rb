@@ -30,6 +30,14 @@ module KernelMaintenanceSupport
       @access_calls = []
     end
 
+    def id
+      "github"
+    end
+
+    def repository_from_remote(remote)
+      Meringue::Forge::GitHubClient.repository_from_remote(remote)
+    end
+
     def pull_request_status(url)
       @status_calls << url.to_s
       @statuses.fetch(url.to_s) do

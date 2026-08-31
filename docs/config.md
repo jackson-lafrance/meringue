@@ -10,28 +10,43 @@ Use `--config PATH` to load a different file for a single run.
 
 Run `/config` for the full-screen schema-driven editor covering every supported setting. `/config --text` retains the read-only diagnostic listing. Bare `/theme` (or `/themes`) opens a preview picker; `/theme <name>`, `/model [head|worker] <provider>/<model-id>`, `/thinking [head|worker] <level>`, and setup compatibility commands use the same validated atomic persistence layer. First-run Setup is a curated mode of this same overlay. See [`settings.md`](settings.md) for interaction, responsive layouts, transactional save/cancel behavior, and provenance.
 
-## Settings schema and experiments
+## Settings schema, experiments, and the alternate backend section
 
-The config carries an internal schema version and the opt-in GitHub integration:
+The config carries an internal schema version, the remaining opt-in experiments, and the alternate backend section:
 
 ```toml
 [settings]
-schema_version = 1
+schema_version = 3
 
 [experiments]
-github_support = false
 agent_defaults_mode = "role-specific"  # shared | role-specific | guided
 # worker_spawning_guidance_prompt = "..."  # shown and applied only in guided mode
+
+[forge]
+frontend = "github"  # github (default) | command
+# command = ["/absolute/path/to/private-frontend-adapter"]
+
+[version_control]
+backend = "github_git"  # github_git (default) | command
+# command = ["/absolute/path/to/private-backend-adapter"]
 ```
 
-New installations default GitHub support off. Existing installations with a pre-upgrade state file or onboarding marker migrate it on so upgrading does not silently remove PR behavior; an explicit value always wins. Disabling it performs no built-in `gh` subprocess/network lookup, hides GitHub-specific TUI commands and status, and preserves historical PR records. The worker model-selection prompt is editable inline through Settings → Experiments, Setup → Experiments, or `/worker guide \"...\"`, but its input is hidden and ignored while the toggle is off. When enabled, heads receive a privacy-filtered routing snapshot without configured or effective worker model/thinking defaults; guided head spawns must set both selections explicitly. See [`settings.md`](settings.md#github-support) and [`orchestration-experiments.md`](orchestration-experiments.md).
+GitHub support is default behavior: there is no experiment checkbox for it, and a fresh installation tracks, refreshes, opens, and retains work around GitHub pull requests without any entry in the file. The built-in frontend performs bounded read-only `gh` lookups for exact issue/PR titles, delivery verification, branch discovery, and PR status refresh; PR state participates in prune/reuse safety, and PR markers, pickers, hints, and browser actions are available.
 
-When GitHub support is enabled, **Test GitHub access** appears as a non-persistent action under Settings → Experiments (and in the Setup Experiments step). It checks the current checkout's `origin` remote, then runs bounded read-only `gh auth status --hostname github.com` and `gh repo view OWNER/REPO --json nameWithOwner` checks. It never creates, edits, closes, comments on, or otherwise mutates a GitHub resource. The same check is available as `/github test`; it reports success, unavailable CLI/service, unauthenticated, repository permission denied, timeout, and malformed-remote outcomes. The action is safe to retry.
+The alternate backend section holds the two axes an installation can swap out. Both are independent, both default to the built-in GitHub-backed pair, and both `command` values are documented extension points that fail closed rather than shipping a fake implementation:
+
+- **Backend** (`[version_control] backend`) — the git backend that provisions and proves isolated mutable workspaces. The default `github_git` uses Git worktrees and requires a GitHub origin; `command` is the extension point for a pluggable backend such as gitstream. See [`version-control-backends.md`](version-control-backends.md).
+- **Frontend** (`[forge] frontend`) — the code-hosting frontend that answers pull-request questions. The default `github` uses the built-in `gh`-backed client; `command` is the extension point for a pluggable frontend such as meteorite. See [`forge-frontends.md`](forge-frontends.md).
+
+Selecting an alternate frontend turns the GitHub-specific delivery UI off for that installation: no built-in `gh` subprocess or network lookup runs, GitHub-specific TUI commands and status are hidden, and historical PR records are preserved. Historical open/unknown records still conservatively retain terminal work during prune, without external I/O. A previously verified `merged` fact still prevents unsafe branch reuse and permits prune. When the GitHub frontend is selected, **Test GitHub access** appears as a non-persistent action under Settings → Alternate backend (and in the Setup step of the same name). It checks the current checkout's `origin` remote, then runs bounded read-only `gh auth status --hostname github.com` and `gh repo view OWNER/REPO --json nameWithOwner` checks. It never creates, edits, closes, comments on, or otherwise mutates a GitHub resource. The same check is available as `/github test`; it reports success, unavailable CLI/service, unauthenticated, repository permission denied, timeout, and malformed-remote outcomes. The action is safe to retry.
+
+The worker model-selection prompt is editable inline through Settings → Experiments, Setup → Experiments, or `/worker guide "..."`, but its input is hidden and ignored while `agent_defaults_mode` is not `guided`. In guided mode, heads receive a privacy-filtered routing snapshot without configured or effective worker model/thinking defaults; guided head spawns must set both selections explicitly. See [`settings.md`](settings.md#experiments-registry) and [`orchestration-experiments.md`](orchestration-experiments.md).
 
 ## First-run setup marker
 
 The first interactive launch opens the shared Settings overlay for a theme,
-separate head/worker defaults and experiment checkboxes. Finishing or confirming
+separate head/worker defaults, the alternate backend section, and experiment
+checkboxes. Finishing or confirming
 a first-run skip records one marker here:
 
 ```toml

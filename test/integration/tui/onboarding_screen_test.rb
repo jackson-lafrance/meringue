@@ -109,13 +109,14 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     satisfy_harness_step
     3.times { send_key(TAB) }
     assert_equal "Experiments", snapshot.fetch("category")
-    assert_equal (Meringue::Experiments::Registry.setting_ids - ["experiments.github_support_test_access"]), snapshot.fetch("rows").map { |row| row.fetch("id") }
+    assert_equal Meringue::Experiments::Registry.setting_ids, snapshot.fetch("rows").map { |row| row.fetch("id") }
 
     geometry = @layout.send(:settings_pane).geometry(compose, width: WIDTH, height: HEIGHT)
     card = geometry.fetch(:card)
     view = @layout.send(:settings_pane).setup_view(compose, width: WIDTH, height: HEIGHT)
     send_mouse("x" => card.fetch(:x) + 2, "y" => view.fetch(:row_y))
-    assert_equal true, snapshot.fetch("rows").first.fetch("value")
+    # The first Experiments row is the agent_defaults_mode selector.
+    assert_equal "experiments.agent_defaults_mode", snapshot.fetch("rows").first.fetch("id")
 
     before = snapshot.slice("category", "row_index", "dirty")
     send_mouse("x" => 0, "y" => 0)

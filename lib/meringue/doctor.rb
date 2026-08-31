@@ -76,9 +76,10 @@ module Meringue
       )
     end
 
-    # `gh` is only ever launched by the GitHub-support experiment, so it is only asked
-    # about when that is on. Reporting a missing gh to someone working locally would be
-    # reporting a tool they were never going to run.
+    # `gh` is only ever launched by the built-in GitHub frontend, so it is only
+    # asked about when that frontend is the one in use. Reporting a missing gh
+    # to someone working through an alternate frontend would be reporting a
+    # tool they were never going to run.
     def github_cli_check
       return nil unless github_support_enabled?
 
@@ -87,13 +88,13 @@ module Meringue
 
       problem(
         "GitHub CLI was not found",
-        detail: "GitHub support looks up pull request titles and states with gh.",
-        fix: "Install the GitHub CLI and run gh auth login, or turn GitHub support off in /config."
+        detail: "The GitHub frontend looks up pull request titles and states with gh.",
+        fix: "Install the GitHub CLI and run gh auth login, or select an alternate frontend in /config."
       )
     end
 
     def github_support_enabled?
-      config.experiment_enabled?("github_support")
+      Forge.github_frontend?(config)
     rescue StandardError
       false
     end
