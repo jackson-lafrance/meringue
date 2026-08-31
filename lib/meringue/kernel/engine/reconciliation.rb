@@ -24,6 +24,9 @@ module Meringue
         pause_results = reconcile_step("finish_worker_pauses", []) { reconcile_pending_worker_pauses }
         resume_results = reconcile_step("finish_worker_resumes", []) { reconcile_pending_worker_resumes }
         interactive_focus_results = reconcile_step("recover_interactive_focus", []) { reconcile_stale_interactive_focuses }
+        interactive_focus_results.concat(
+          reconcile_step("observe_interactive_focus", []) { reconcile_active_interactive_focuses }
+        )
         pending_prompt_results = reconcile_step("deliver_pending_prompts", []) { deliver_pending_agent_prompts }
         recovered_results = reconcile_step("recover_head_results", []) { recover_unapplied_head_results }
         prune_result = reconcile_step("prune_killed_records", { "changed" => false, "log_entry_ids" => [] }) { prune_killed_records }

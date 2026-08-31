@@ -230,6 +230,14 @@ module Meringue
         raise NotImplementedError, "harness clients must implement #prepare_interactive_session"
       end
 
+      # Reports a terminal turn that a native focused process wrote after the handoff checkpoint.
+      # Returning nil means the focused turn is still active or the provider cannot classify it.
+      # This read-only observation must not send input to or take ownership from the focused process.
+      def interactive_turn_outcome(_session_ref, handoff: nil)
+        _ = handoff
+        nil
+      end
+
       # Reclaims a native interactive process left behind by a crashed Meringue instance. Providers
       # must verify the recorded pid still belongs to their own interactive command before signaling.
       def reclaim_interactive_session(_session_ref, pid:)

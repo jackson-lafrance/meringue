@@ -62,11 +62,11 @@ module Meringue
         true
       end
 
-      # What one poll observed. Anything Meringue actually wrote to the log this pass is activity
-      # by definition; otherwise the harness's own last-event timestamp is the evidence, and a
-      # harness that reports none simply leaves the clock where it was.
-      def observed_worker_activity_at(session_ref, log_entry_ids, now)
-        return now if Array(log_entry_ids).any?
+      # What one poll observed. Every drained event is activity, including reasoning deltas and
+      # tool lifecycle events that intentionally do not become worker log lines. Anything Meringue
+      # did log is also activity; otherwise the harness's last-event timestamp is the evidence.
+      def observed_worker_activity_at(session_ref, events, log_entry_ids, now)
+        return now if Array(events).any? || Array(log_entry_ids).any?
         return nil unless session_ref.is_a?(Hash)
 
         session_ref.fetch("last_event_at", nil)

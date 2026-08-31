@@ -6,6 +6,8 @@ module Meringue
     # shell, editor, and focused harness processes; the kernel service owns the
     # session handoff and transport state, not this renderer/controller.
     class Controller
+      INTERACTIVE_ACTIVITY_MIN_INTERVAL_SECONDS = 1.0
+
       def self.from_config(config, env: ENV, focus_session_service: nil, session_environment_patterns: [])
         new(
           terminal_manager: TerminalManager.from_config(
@@ -28,6 +30,7 @@ module Meringue
         @interactive_screens = {}
         @pending_interactive_opens = {}
         @pending_interactive_closes = {}
+        @interactive_activity_at = {}
         @mutex = Mutex.new
       end
 
@@ -225,6 +228,7 @@ module Meringue
         command = [executable.to_s, *command.drop(1)] if executable && !executable.to_s.empty?
 
         session = interactive_session_factory.call(command: command, env: transition.dig("result", "interactive_env"))
+        observe_interactive_output(session, agent.fetch("id"))
         started = nil
         start_callback = lambda do |pid|
           started = focus_session_service.mark_agent_interactive_focus_started(agent.fetch("id"), pid: pid)
@@ -528,6 +532,7 @@ module Meringue
           @interactive_screens.clear
           @interactive_sessions.clear
           @pending_interactive_closes.clear
+          @interactive_activity_at.clear
         end
         terminal_manager.close_all
       end
@@ -539,6 +544,28 @@ module Meringue
 
       def interactive_entry(agent)
         @mutex.synchronize { @interactive_sessions[agent_key(agent)] }
+      end
+
+      def observe_interactive_output(session, agent_id)
+        return unless session.respond_to?(:on_output)
+        return unless focus_session_service.respond_to?(:note_agent_interactive_activity)
+
+        session.on_output { |_bytes| note_interactive_activity(agent_id) }
+      end
+
+      def note_interactive_activity(agent_id)
+        now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        due = @mutex.synchronize do
+          previous = @interactive_activity_at[agent_id.to_s]
+          next false if previous && now - previous < INTERACTIVE_ACTIVITY_MIN_INTERVAL_SECONDS
+
+          @interactive_activity_at[agent_id.to_s] = now
+          true
+        end
+        focus_session_service.note_agent_interactive_activity(agent_id) if due
+      rescue StandardError
+        # The PTY reader owns the output. Kernel activity bookkeeping must not interrupt it.
+        nil
       end
 
       def pending_interactive_open?(agent)

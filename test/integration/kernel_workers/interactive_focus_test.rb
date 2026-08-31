@@ -23,7 +23,7 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
   class InteractiveHarnessClient < RecordingHarnessClient
     attr_reader :prepared, :resumed, :reclaimed
     attr_accessor :replacement_session, :prepare_error, :resume_error, :resume_streaming, :native_completed,
-                  :reported_turn_outcome
+                  :reported_turn_outcome, :interactive_outcome
 
     def initialize
       super(provider: "pi")
@@ -77,6 +77,11 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
 
     def turn_outcome(_session_ref)
       reported_turn_outcome
+    end
+
+    def interactive_turn_outcome(_session_ref, handoff: nil)
+      _ = handoff
+      interactive_outcome
     end
 
     def resume_dashboard_session(session_ref, handoff: nil)
@@ -150,7 +155,7 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
     assert_equal 1, client.prepared.length
     assert_equal 1, client.aborts.length, "a repeated focus request must not abort the turn twice"
 
-    # A background tick cannot read or settle the same JSONL while the native PTY owns it.
+    # Preparation has no native process yet, so a background tick leaves the pending handoff alone.
     before = agent(engine, worker_id).fetch("updated_at")
     engine.reconcile_sessions
     assert_equal before, agent(engine, worker_id).fetch("updated_at")
@@ -255,6 +260,41 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
     assert_equal requested, warning.dig("details", "requested_model")
     assert_equal effective, warning.dig("details", "effective_model")
     assert_equal "Pi substituted model #{effective} for requested model #{requested}.", warning.fetch("message")
+  end
+
+  def test_a_finished_native_turn_settles_before_quiet_detection_and_releases_its_dependent
+    client = InteractiveHarnessClient.new
+    client.streaming = true
+    engine = build_engine(harness_client: client)
+    context = project_with_issue(engine)
+    worker_id = spawn_worker(engine, context.fetch("issue_id"), prompt: "Finish in native focus.").fetch("target_id")
+    dependent_id = spawn_worker(
+      engine,
+      context.fetch("issue_id"),
+      prompt: "Continue after the focused worker.",
+      after_agent_id: worker_id
+    ).fetch("target_id")
+    engine.begin_agent_interactive_focus(worker_id)
+    engine.mark_agent_interactive_focus_started(worker_id, pid: 52_425)
+    patch_agent!(worker_id) do |record|
+      record["harness_metadata"]["last_activity_at"] = (Time.now.utc - 1_000).iso8601
+    end
+    client.interactive_outcome = {
+      "state" => "completed",
+      "stop_reason" => "endTurn",
+      "last_assistant_text" => "Focused work is complete.",
+      "turn_ended_at" => Time.now.utc.iso8601
+    }
+
+    engine.reconcile_sessions
+
+    settled = agent(engine, worker_id)
+    assert_equal "completed", settled.fetch("status")
+    assert_equal false, settled.dig("harness_metadata", "is_streaming")
+    refute_equal "queued", agent(engine, dependent_id).fetch("status")
+    assert_includes log_messages(engine),
+                    "Started queued worker #{dependent_id} on #{context.fetch("issue_id")} because #{worker_id} settled (completed)."
+    refute state(engine).fetch("logs").any? { |entry| entry.fetch("message", "").include?("produced no output") }
   end
 
   def test_successful_focus_entry_and_exit_do_not_append_user_visible_handoff_logs

@@ -26,13 +26,14 @@ class WorkspaceControllerTest < Minitest::Test
   end
 
   class InteractiveFocusDouble
-    attr_reader :begun, :started, :ended
+    attr_reader :begun, :started, :ended, :activity
     attr_accessor :begin_result, :end_result
 
     def initialize
       @begun = []
       @started = []
       @ended = []
+      @activity = []
     end
 
     def begin_agent_interactive_focus(agent_id)
@@ -43,6 +44,11 @@ class WorkspaceControllerTest < Minitest::Test
     def mark_agent_interactive_focus_started(agent_id, pid:)
       @started << [agent_id, pid]
       { "status" => "accepted", "message" => "started" }
+    end
+
+    def note_agent_interactive_activity(agent_id)
+      @activity << agent_id
+      { "status" => "accepted", "message" => "recorded" }
     end
 
     def end_agent_interactive_focus(agent_id)
@@ -303,6 +309,9 @@ class WorkspaceControllerTest < Minitest::Test
       assert_equal ["Agent ready", ""], snapshot.fetch("lines")
       assert_equal({ "status" => "written", "bytes" => 2 }, controller.handle_agent_key(key: "x\n", agent: agent))
       assert_equal({ "status" => "written", "bytes" => 4 }, controller.handle_agent_key(key: "\e[5~", agent: agent))
+      @sessions.last.feed_output("tool started\r\n")
+      assert_equal [agent.fetch("id")], focus.activity,
+                   "native PTY output must refresh activity even when no harness event is logged"
       assert_equal(
         { "status" => "written", "bytes" => 4 },
         controller.handle_agent_key(key: { "type" => "mouse", "kind" => "wheel_down", "x" => 3, "y" => 2 }, agent: agent)

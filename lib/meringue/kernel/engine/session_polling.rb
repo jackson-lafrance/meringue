@@ -373,7 +373,12 @@ module Meringue
         # pass actually observed, so Meringue's own bookkeeping writes below cannot reset it.
         record_worker_activity!(
           agent,
-          observed_worker_activity_at(poll_result.fetch("session_ref", {}), log_ids, now)
+          observed_worker_activity_at(
+            poll_result.fetch("session_ref", {}),
+            poll_result.fetch("events", []),
+            log_ids,
+            now
+          )
         )
         refresh_worker_parent_statuses!(state, agent, now) if agent.fetch("type", nil) == "worker"
         changed = agent != previous_agent || worker_parent_statuses(state, agent) != previous_parent_statuses || log_ids.any?
