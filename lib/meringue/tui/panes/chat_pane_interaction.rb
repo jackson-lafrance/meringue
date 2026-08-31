@@ -830,13 +830,34 @@ module Meringue
           selection = state.fetch("_selection", {}) || {}
           status = selection.fetch("status", "").to_s.strip
           return [["⧉ #{status}", Style::SUCCESS]] unless status.empty?
+          return HintLine.segments([["↑↓", "select"], ["Enter", "open"], ["A", "workspace"], ["Esc", "clears"]]) if agent_tree_navigation_active?(state)
+
           if selection.fetch("mode", nil).to_s == "logs_cursor"
-            return [["⧉ logs select", Style::ACCENT], ["  arrows move · Shift+arrows extend · Ctrl-C copies · Esc exits", Style::MUTED]]
+            return selection_context_hint_segments("⧉ logs selection", [
+              ["Alt-V", "toggle"],
+              ["Shift+arrows", "extend"],
+              ["Ctrl-C", "copies"],
+              ["Esc", "clears"]
+            ])
           end
-          return [["⧉ selection", Style::ACCENT], ["  Ctrl-C copies", Style::MUTED]] if selection.fetch("active", false)
-          return [["use the mouse or shift+arrows to select text.", Style::MUTED]] if logs_pane_focused?(state)
+
+          if selection.fetch("active", false)
+            return selection_context_hint_segments("⧉ selection", [["Ctrl-C", "copies"], ["Esc", "clears"]])
+          end
+
+          return selection_context_hint_segments("text selection", [["Shift+arrows", "select"]]) if logs_pane_focused?(state)
 
           []
+        end
+
+        def selection_context_hint_segments(title, entries)
+          hints = HintLine.segments(entries)
+          [[title, Style::ACCENT]] + (hints.empty? ? [] : [[HintLine::SEPARATOR, Style::DIM]] + hints)
+        end
+
+        def agent_tree_navigation_active?(state)
+          navigation = state.fetch("_agent_tree_navigation", {}) || {}
+          navigation.fetch("active", false) == true
         end
 
         def logs_pane_focused?(state)

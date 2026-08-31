@@ -129,7 +129,7 @@ The destination is named in exactly one place: the composer's pane title, on the
 The single row under the chat bar is shared, left to right, and truncated at the terminal width, so every group has to earn its columns. In order:
 
 1. **Selection actions**: `Esc clears` for a selected target, or `slash ignores target · Esc clears` while a slash command bypasses the selection. Never the target id, which the composer title above already names.
-2. **Text-selection state** when a selection or the logs cursor is active (`⧉ selection  Ctrl-C copies`, `⧉ copied 3 lines`, or the `Alt-V` hint while the logs pane is focused).
+2. **Text-selection state** when a selection or the logs cursor is active (`⧉ selection · Ctrl-C copies · Esc clears`, `⧉ copied 3 lines`, or `text selection · Shift+arrows select` while the logs pane is focused).
 3. **Work in flight**: `● 2W 1H` (working workers and heads) or `2 prompts running`. There is no `active` label; the lit dot and the counts say it.
 4. **Open questions**: `? 2`.
 5. **Delivery PRs**, which depend on what the dashboard is looking at:
@@ -143,7 +143,7 @@ The single row under the chat bar is shared, left to right, and truncated at the
 | nothing is selected and every tracked PR is merged/closed | `no open PRs` | says nothing is open |
 | nothing is selected and no PR has ever been tracked | *(silent)* | says nothing is tracked yet |
 
-6. **Idle discovery**: `Ctrl-C clear/quit · Tab focus · / commands`, shown only when no selection, text-selection state, activity, questions, PR summary, or slash popup needs the row.
+6. **Jump mode**: `↑↓ select · Enter open · A workspace · Esc clears`, shown while the AgentTree cursor is active. **Idle discovery** then uses `Ctrl-C clear/quit · Tab focus · / commands`, only when no selection, text-selection state, activity, questions, PR summary, or slash popup needs the row.
 
 Delivery PR records are owned by issues, so an issue selection shows the newest PR that is still live, falling back to the newest settled one so a finished issue still says what it delivered. A worker selection resolves to that owning issue for the same action and never gets a second worker-owned marker or record. Every one of these facts comes from state the kernel already persisted (`delivery_pull_requests` on the issue); rendering never runs `gh`.
 
@@ -242,7 +242,7 @@ Focus the logs pane first (`Tab` / `Ctrl-Tab` until the logs outline is active),
 - `PageUp` / `PageDown`: move the cursor a screenful at a time.
 - `Shift-Left` / `Shift-Right` / `Shift-Up` / `Shift-Down`, `Shift-Home` / `Shift-End`, `Shift-Alt-Left` / `Shift-Ctrl-Left`, `Shift-Alt-Right` / `Shift-Ctrl-Right`, and `Shift-PageUp` / `Shift-PageDown`: extend the selection from the anchor. The highlight is the same `SELECTION` style mouse drags use.
 - `Ctrl-C` / `Alt-C`: copy the selection to the system clipboard. With the cursor on but nothing extended, this copies the whole cursor line. `Ctrl-C` never quits while the logs cursor is on.
-- `Esc`: clear the selection and turn the cursor off, which returns arrow keys and `PageUp` / `PageDown` to scrolling the logs pane.
+- `Esc`: clear the selection and turn the cursor off (`Esc clears`), which returns arrow keys and `PageUp` / `PageDown` to scrolling the logs pane.
 
 Selection points are stored in logs content coordinates, so a highlight keeps covering the same text while the pane scrolls or new log entries arrive. Moving focus off the logs pane (or entering jump mode) turns the cursor off, and typing a printable character sends it to the composer and clears the highlight.
 

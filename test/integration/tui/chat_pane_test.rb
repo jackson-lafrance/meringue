@@ -125,16 +125,22 @@ class TuiChatPaneTest < Minitest::Test
   end
 
   def test_selection_hints_replace_each_other
-    guidance = @pane.bottom_hint_line(composed_state(empty_state, scroll: { "active_pane" => "logs" }))
-    assert_includes guidance, ["use the mouse or shift+arrows to select text.", Style::MUTED]
+    guidance = plain_line(@pane.bottom_hint_line(composed_state(empty_state, scroll: { "active_pane" => "logs" })))
+    assert_equal "text selection · Shift+arrows select", guidance
 
     active = plain_line(@pane.bottom_hint_line(composed_state(empty_state, selection: { "active" => true })))
-    assert_includes active, "⧉ selection"
-    assert_includes active, "Ctrl-C copies"
+    assert_equal "⧉ selection · Ctrl-C copies · Esc clears", active
 
     status = plain_line(@pane.bottom_hint_line(composed_state(empty_state, selection: { "status" => "copied 3 lines" })))
     assert_includes status, "⧉ copied 3 lines"
     refute_includes status, "Ctrl-C copies"
+  end
+
+  def test_agent_tree_jump_footer_uses_the_same_concise_escape_wording
+    state = composed_state(empty_state, navigation: { "active" => true, "selected_agent_id" => "P1-I1" })
+
+    text = plain_line(@pane.bottom_hint_line(state))
+    assert text.start_with?("↑↓ select · Enter open · A workspace · Esc clears"), text
   end
 
   def test_delivery_pr_hint_appears_for_the_selected_agent
