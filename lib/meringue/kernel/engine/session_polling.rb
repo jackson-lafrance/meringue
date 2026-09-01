@@ -171,6 +171,11 @@ module Meringue
           )
         end
         events = client.respond_to?(:read_events) ? client.read_events(state_ref) : []
+        human_input_requests = if client.respond_to?(:human_input_requests)
+                                 client.human_input_requests(events)
+                               else
+                                 []
+                               end
         # A worker whose live session a person is currently driving keeps reporting progress, but
         # its record is not retired underneath them. The turn they just watched finish is the end
         # of *their* exchange, not the end of the worker's assignment. A newly-started interactive
@@ -197,6 +202,7 @@ module Meringue
           "polled_session_ref" => session_ref,
           "session_ref" => state_ref,
           "events" => events,
+          "human_input_requests" => human_input_requests,
           # Only a session that is still running has mid-work progress worth reporting; a settled
           # turn is about to log its real result instead.
           "progress" => settled ? [] : session_progress_items(agent, client, events),
@@ -344,6 +350,11 @@ module Meringue
         end
       end
 
+      def human_input_pending?(agent)
+        marker = (agent.fetch("harness_metadata", {}) || {}).fetch("human_input_request", nil)
+        marker.is_a?(Hash) && marker.fetch("state", nil).to_s == "pending"
+      end
+
       def refresh_agent_session_state_in(state, poll_result)
         agent = find_session_agent(
           state,
@@ -363,7 +374,15 @@ module Meringue
         # The session is streaming again, so a recorded incomplete or dead-turn reason is stale.
         clear_settle_failure!(agent)
         clear_incomplete_turn!(agent)
-        agent["status"] = "working"
+        requests = Array(poll_result.fetch("human_input_requests", [])).select { |request| request.is_a?(Hash) }
+        if requests.any?
+          metadata = agent.fetch("harness_metadata", {}) || {}
+          metadata["human_input_request"] = requests.last.merge("state" => "pending", "detected_at" => now)
+          agent["harness_metadata"] = metadata
+          agent["status"] = "blocked"
+        else
+          agent["status"] = human_input_pending?(agent) ? "blocked" : "working"
+        end
         log_ids = append_harness_event_logs(state, agent, poll_result.fetch("events", []))
         log_ids.concat(append_session_model_substitution_log(state, agent))
         log_ids.concat(record_worker_progress!(state, agent, poll_result.fetch("progress", []), now))

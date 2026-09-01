@@ -48,6 +48,10 @@ module Meringue
         PiSessionView.progress_items(events)
       end
 
+      def human_input_requests(events)
+        HumanInput.requests(events)
+      end
+
       def open_session_view(session_ref)
         process = process_for_session(session_ref, required: false)
         return history_session_view(session_ref) unless process

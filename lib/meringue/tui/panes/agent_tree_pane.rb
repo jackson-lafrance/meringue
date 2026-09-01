@@ -874,11 +874,17 @@ module Meringue
           "#{completed}/#{visible_workers.length}"
         end
 
+        def human_input_marker(worker)
+          marker = worker.dig("harness_metadata", "human_input_request")
+          marker.is_a?(Hash) && marker.fetch("state", nil).to_s == "pending" ? "needs input" : ""
+        end
+
         def worker_suffix(worker, _issue = nil)
           # Delivery PRs belong to the issue row. Worker rows retain only worker/session state,
           # so a replacement or a second worker cannot duplicate the issue's PR affordance.
           [
             paused_marker(worker),
+            human_input_marker(worker),
             provisioning_marker(worker),
             unfinished_marker(worker),
             quiet_marker(worker),

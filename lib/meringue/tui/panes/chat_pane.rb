@@ -398,6 +398,7 @@ module Meringue
           heads = active_agent_count(state, "head")
           {
             "context" => bottom_context_segments(state),
+            "human_input" => human_input_segments(state),
             "open_pull_requests" => bottom_open_pull_request_segments(state),
             "workers" => bottom_worker_count_segments(workers, Settings.quiet_worker_count(state)),
             "heads" => bottom_agent_count_segments(heads, "head", Style::ACCENT_BOLD),
@@ -472,6 +473,17 @@ module Meringue
 
         def present_status_value(value)
           value.to_s.strip unless value.to_s.strip.empty?
+        end
+
+        def human_input_segments(state)
+          count = Array(state.fetch("agents", [])).count do |agent|
+            marker = agent.is_a?(Hash) ? agent.dig("harness_metadata", "human_input_request") : nil
+            agent.is_a?(Hash) && agent.fetch("type", nil).to_s == "worker" && marker.is_a?(Hash) && marker.fetch("state", nil).to_s == "pending"
+          end
+          return [] unless count.positive?
+
+          label = count == 1 ? "⚠ 1 agent needs input" : "⚠ #{count} agents need input"
+          [[label, Style::WARNING], [" · double-click worker", Style::MUTED]]
         end
 
         def bottom_open_pull_request_segments(state)
