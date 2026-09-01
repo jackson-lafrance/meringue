@@ -42,6 +42,7 @@ class InputQuestionAnswerFlowTest < Minitest::Test
 
       assert(messages.any? { |message| message.include?('User ran command: /answer Q1 "use the staging environment"') })
       assert_includes messages, "Answered question Q1."
+      refute(messages.any? { |message| message.include?("Answered Q1: use the staging environment") })
     end
   end
 
@@ -70,6 +71,12 @@ class InputQuestionAnswerFlowTest < Minitest::Test
       assert_equal "accepted", routing.fetch("apply_head_result_status")
       assert_equal %w[AddProject CreateIssue], routing.fetch("command_results").map { |result| result.fetch("command_type") }
       assert_equal ["Fix login in staging"], sandbox.state.fetch("issues").map { |issue| issue.fetch("title") }
+
+      call = sandbox.head_runner.calls.last
+      assert_equal "Q1", call.fetch("question_id")
+      answered = call.fetch("context_prompt").fetch("routing_context").fetch("question_being_answered")
+      assert_equal "answered", answered.fetch("status")
+      assert_equal "use the staging environment", answered.fetch("answer")
     end
   end
 

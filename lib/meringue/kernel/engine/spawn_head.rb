@@ -95,6 +95,7 @@ module Meringue
         # Internally routed heads (for example the head spawned for an answered question) carry a
         # long structured prompt. The visible chat log should stay short and human-facing.
         log_message = present_string(value_at(payload, "log_message", "LogMessage"))
+        suppress_log = value_at(payload, "_suppress_log", "suppress_log") == true
         log_source_type = present_string(value_at(payload, "_log_source_type", "log_source_type"))
         log_source_type = "user" unless %w[user kernel system].include?(log_source_type)
         log_source_id = present_string(value_at(payload, "_log_source_id", "log_source_id"))
@@ -187,24 +188,28 @@ module Meringue
           )
           state.fetch("agents") << agent
 
-          log_ids = append_log(
-            state,
-            source_type: log_source_type,
-            source_id: log_source_type == "user" ? nil : log_source_id,
-            level: "info",
-            message: log_message || user_message.to_s.strip,
-            details: {
-              "head_id" => head_id,
-              "question_id" => present_string(question_id),
-              "retry_of_head_id" => retry_of && retry_of.fetch("head_id", nil),
-              "takeover_of_head_id" => takeover_target&.fetch("id", nil),
-              "follow_up_of_head_id" => follow_up_of_head_id,
-              "routing_action" => if takeover_target
-                                    follow_up_of_head_id ? "head_follow_up" : "head_takeover"
-                                  end,
-              **selected_target_log_details(selected_target)
-            }.compact
-          )
+          log_ids = if suppress_log
+                       []
+                     else
+                       append_log(
+                         state,
+                         source_type: log_source_type,
+                         source_id: log_source_type == "user" ? nil : log_source_id,
+                         level: "info",
+                         message: log_message || user_message.to_s.strip,
+                         details: {
+                           "head_id" => head_id,
+                           "question_id" => present_string(question_id),
+                           "retry_of_head_id" => retry_of && retry_of.fetch("head_id", nil),
+                           "takeover_of_head_id" => takeover_target&.fetch("id", nil),
+                           "follow_up_of_head_id" => follow_up_of_head_id,
+                           "routing_action" => if takeover_target
+                                                 follow_up_of_head_id ? "head_follow_up" : "head_takeover"
+                                               end,
+                           **selected_target_log_details(selected_target)
+                         }.compact
+                       )
+                     end
           # Lineage is recorded next to the prompt that caused it, so the log reads
           # "<your message>" then "Retrying head H13 as H14 ..." in order.
           log_ids.concat(record_head_retry_respawn!(state, retry_of, head_id)) if retry_of

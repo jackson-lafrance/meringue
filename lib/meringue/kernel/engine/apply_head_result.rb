@@ -593,7 +593,7 @@ module Meringue
           "SpawnHead",
           "user_message" => answer_routing_prompt(question),
           "question_id" => question.fetch("id"),
-          "log_message" => "Answered #{question.fetch("id")}: #{question.fetch("answer")}"
+          "_suppress_log" => true
         )
         routing = { "spawn_head_result" => spawn_result }
         return routing unless spawn_result.fetch("status", nil) == "accepted"
