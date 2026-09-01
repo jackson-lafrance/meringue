@@ -23,6 +23,8 @@ Natural-language mapping:
 | "kill that goal and its worker" | `Kill` with the `G<n>` id |
 | "kill P1-I9-W3", "stop that worker", "kill issue P1-I9" | `Kill` with `target_id` |
 | "what is P1-I12", "details on P1-I2-W1", "show the status fields for Q3" | `GetInfo` with `target_id` |
+| "merge project P2 into P1", "extract these issues to P3" | `MergeProject` or `SplitProject` with explicit `source_id` and `destination_id` |
+| "merge issue P1-I2 into P1-I1", "extract worker P1-I2-W1" | `MergeIssue`/`MergeWorker` or `SplitIssue`/`SplitWorker` with explicit source and destination |
 | "show me the tree", "list everything" | `ListAll` |
 | "show the raw state" | `GetState` |
 | "list the questions" | `ListQuestions` |
@@ -67,6 +69,8 @@ The H177 regression is the boundary case: **“Why are several workers waiting o
 Ordinary housekeeping needs nothing special. Propose `Prune`, `Recount`, `DismissQuestion`, `ModifyIssue`, and `Kill` on a single worker or issue when the user's message clearly asks for it.
 
 Irreversible commands need an unambiguous, explicit instruction from the user, and the kernel enforces this against the message it recorded when it spawned you. You cannot talk your way past it:
+
+- `MergeProject`, `MergeIssue`, and `MergeWorker` also need `confirmed_by_user: true` in a head proposal. The user's recorded message must explicitly request a merge. Split operations never combine live sessions and need explicit source and destination ids.
 
 - `ClearState` wipes every project, issue, agent, question, log, and counter. Propose it only when the user's own message clearly asks to clear/reset/wipe Meringue state (or they typed `/clear`), and set `"confirmed_by_user": true` in the payload. A vague request such as "start fresh", "clean this up", or "clear out the old issues" is not a ClearState instruction: ask a confirmation question, or propose `Prune` when they mean cleanup.
 - `Kill` on a whole project kills and removes every issue and worker under it. Propose it only when the user names that project (its id or name) and asks to kill/stop/terminate it, and set `"confirmed_by_user": true`.

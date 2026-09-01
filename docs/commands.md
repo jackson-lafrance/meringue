@@ -52,9 +52,15 @@ Useful slash commands inside the TUI include:
 - `/project add <path> [name]` — register a project. A directory can hold more than one: naming a second project at a path you have already registered opens a separate board over the same files, which is how a migration effort and a resiliency effort stay apart while sharing one repository. An unnamed `/project add` still means "the project at this path" and reuses the one already there.
 - `/issue move <issue_id> <project_id|issue_id|top>` — move an issue to another project on the same checkout, reparent it beneath another issue, or promote it to the top level. Its child issues and their workers travel with it, keeping their live sessions and worktrees.
 - `/project rename <project_id> "<name>"` — rename a project.
+- `/project merge <source_project_id> <destination_project_id>` — merge logical projects with the same repository identity. The source record is removed only after one atomic state commit.
+- `/project split <source_project_id> <destination_project_id> <issue_id...>` — extract selected issue trees while preserving worker sessions, workspaces, branches, and delivery metadata.
 - `/issue create <project_id> "<title>" ["description"]` — create an issue manually.
+- `/issue merge <source_issue_id> <destination_issue_id>` — merge workers and child issues into a destination issue.
+- `/issue split <source_issue_id> <destination_issue_id> [worker_id...]` — extract selected workers into another issue.
 - `/issue rename <issue_id> "<title>"` — rename an issue. For both rename commands, focus the AgentTree, select a row, and press `r` to prefill the one that matches the selected row (a worker resolves to its issue).
 - `/worker spawn <issue_id> "<prompt>"` — spawn a worker for an issue.
+- `/worker merge <source_worker_id> <destination_worker_id>` — merge a terminal worker record without combining live harness sessions.
+- `/worker split <source_worker_id> <destination_worker_id>` — extract a worker while preserving its session, checkout, branch, and delivery metadata.
 - `/worker guide "<additional system prompt>"` — persist the opt-in worker model-selection prompt; use `@` for model completion and `#` for thinking-level completion.
 - `/worker pause <agent_id>` — stop the current worker turn without killing its resumable session.
 - `/worker resume <agent_id>` — continue a paused worker from the same session and workspace.

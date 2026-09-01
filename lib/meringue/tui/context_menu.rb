@@ -110,6 +110,8 @@ module Meringue
             id: "move", label: "Move to issue…", draft: "/move #{id} ",
             enabled: move_targets?(state, worker), note: move_targets?(state, worker) ? nil : "no other issue to move to"
           ),
+          Entry.new(id: "merge", label: "Merge into worker…", draft: "/worker merge #{id} "),
+          Entry.new(id: "split", label: "Extract worker…", draft: "/worker split #{id} "),
           Entry.new(
             id: "open_pr", label: "Open pull request", action: "open_pr",
             enabled: github_enabled, note: github_enabled ? nil : "GitHub support is off"
@@ -151,6 +153,8 @@ module Meringue
             enabled: !siblings.empty?,
             note: siblings.empty? ? "no other project on this checkout" : nil
           ),
+          Entry.new(id: "merge", label: "Merge into issue…", draft: "/issue merge #{id} "),
+          Entry.new(id: "split", label: "Extract workers…", draft: "/issue split #{id} "),
           Entry.new(
             id: "promote", label: "Promote to top level", draft: "/issue move #{id} top",
             enabled: !issue.fetch("parent_issue_id", nil).to_s.strip.empty?,
@@ -175,6 +179,8 @@ module Meringue
             draft: "/project add #{project.fetch("root_path", "")} ",
             note: "a second board over the same directory"
           ),
+          Entry.new(id: "merge", label: "Merge into project…", draft: "/project merge #{id} "),
+          Entry.new(id: "split", label: "Extract issues…", draft: "/project split #{id} "),
           Entry.new(id: "kill", label: "Kill subtree", draft: "/kill #{id}")
         ]
       end

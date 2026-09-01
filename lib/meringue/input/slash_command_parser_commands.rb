@@ -145,6 +145,12 @@ module Meringue
           return invalid("Usage: /project rename <project_id> \"<name>\"") unless tokens.length >= 3
 
           kernel_command("ModifyProject", "project_id" => tokens[1], "name" => tokens[2..].join(" "))
+        when "merge", "split"
+          return invalid("Usage: /project #{tokens.first} <source_project_id> <destination_project_id> [issue_id...]") unless tokens.length >= 3
+          type = tokens.first == "merge" ? "MergeProject" : "SplitProject"
+          payload = { "source_id" => tokens[1], "destination_id" => tokens[2] }
+          payload["issue_ids"] = tokens[3..] if type == "SplitProject"
+          kernel_command(type, payload)
         else
           invalid("Usage: /project add <path> [name] | /project rename <project_id> \"<name>\"")
         end
@@ -166,8 +172,14 @@ module Meringue
           kernel_command("ModifyIssue", "issue_id" => tokens[1], "title" => tokens[2..].join(" "))
         when "move"
           parse_issue_move(tokens)
+        when "merge", "split"
+          return invalid("Usage: /issue #{tokens.first} <source_issue_id> <destination_issue_id> [worker_id...]") unless tokens.length >= 3
+          type = tokens.first == "merge" ? "MergeIssue" : "SplitIssue"
+          payload = { "source_id" => tokens[1], "destination_id" => tokens[2] }
+          payload["worker_ids"] = tokens[3..] if type == "SplitIssue"
+          kernel_command(type, payload)
         else
-          invalid("Usage: /issue create <project_id> \"<title>\" [\"description\"] | /issue rename <issue_id> \"<title>\" | /issue move <issue_id> <project_id|issue_id|top>")
+          invalid("Usage: /issue create <project_id> \"<title>\" [\"description\"] | /issue rename <issue_id> \"<title>\" | /issue move <issue_id> <project_id|issue_id|top> | /issue merge <source_issue_id> <destination_issue_id> | /issue split <source_issue_id> <destination_issue_id> [worker_id...]")
         end
       end
 
@@ -204,6 +216,9 @@ module Meringue
           return invalid("Usage: /worker #{tokens.first.downcase} <agent_id>") unless tokens.length == 2
 
           kernel_command("SetAgentPruneProtection", "agent_id" => tokens[1], "protected" => tokens.first.to_s.downcase == "protect")
+        when "merge", "split"
+          return invalid("Usage: /worker #{tokens.first} <source_worker_id> <destination_worker_id>") unless tokens.length == 3
+          kernel_command(tokens.first == "merge" ? "MergeWorker" : "SplitWorker", "source_id" => tokens[1], "destination_id" => tokens[2])
         when "export"
           return invalid("Usage: /worker export <bundle_path> [agent_id...]") if tokens.length < 2
 

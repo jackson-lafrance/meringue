@@ -879,6 +879,7 @@ module Meringue
         guard = case command_type
                 when "ClearState" then clear_state_head_guard(head, payload)
                 when "Kill" then kill_head_guard(head, payload)
+                when "MergeProject", "MergeIssue", "MergeWorker" then merge_head_guard(head, payload, command_type)
                 when "PromptAgent" then prompt_agent_head_guard(head, payload)
                 when "SpawnHead" then head_takeover_command_guard(head, payload)
                 when "SpawnWorker" then worker_selection_guidance_spawn_guard(head, payload)
@@ -889,6 +890,18 @@ module Meringue
         synchronized_state do
           rejected_result(command_id, command_type, guard.fetch("message"), guard.fetch("errors"))
         end
+      end
+
+      def merge_head_guard(head, payload, command_type)
+        source = present_string(value_at(payload, "source_id", "source", "from"))
+        destination = present_string(value_at(payload, "destination_id", "destination", "to"))
+        message = head_record_user_message(head)
+        return nil if head_command_user_confirmed?(payload) && source && destination && message.downcase.include?("merge")
+
+        {
+          "message" => "#{command_type} was refused because merging removes the source record. Ask for explicit confirmation and set \"confirmed_by_user\": true.",
+          "errors" => ["merge_requires_user_confirmation", "merge_requires_explicit_user_instruction"]
+        }
       end
 
       def worker_selection_guidance_defaults_guard(head)

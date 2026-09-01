@@ -215,6 +215,12 @@ module Meringue
         "reparent" => "MoveWorker",
         "move_issue" => "MoveIssue",
         "reparent_issue" => "MoveIssue",
+        "merge_project" => "MergeProject",
+        "merge_issue" => "MergeIssue",
+        "merge_worker" => "MergeWorker",
+        "split_project" => "SplitProject",
+        "split_issue" => "SplitIssue",
+        "split_worker" => "SplitWorker",
         "prompt_agent" => "PromptAgent",
         "pause_worker" => "PauseWorker",
         "resume_worker" => "ResumeWorker",
@@ -302,11 +308,17 @@ module Meringue
         ["/themes", "TUI local: open the interactive theme picker."],
         ["/project add <path> [name]", "Register a project directory."],
         ["/project rename <project_id> \"<name>\"", "Rename a project."],
+        ["/project merge <source_project_id> <destination_project_id>", "Merge projects with the same repository identity."],
+        ["/project split <source_project_id> <destination_project_id> <issue_id...>", "Extract selected issues into another project."],
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
         ["/issue rename <issue_id> \"<title>\"", "Rename an issue."],
         ["/issue move <issue_id> <project_id|issue_id|top>", "Move an issue to another project on the same checkout, reparent it under another issue, or promote it to the top level. Its child issues and their workers move with it."],
+        ["/issue merge <source_issue_id> <destination_issue_id>", "Merge issue workers and children into a destination issue."],
+        ["/issue split <source_issue_id> <destination_issue_id> [worker_id...]", "Extract selected workers into another issue."],
         ["/move <agent_id> <issue_id>", "Move an existing worker to a different issue without restarting its harness session. The worker keeps its session, worktree, and branch; only its AgentTree assignment changes."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
+        ["/worker merge <source_worker_id> <destination_worker_id>", "Merge terminal worker records without combining live sessions."],
+        ["/worker split <source_worker_id> <destination_worker_id>", "Extract a worker while preserving its session and checkout."],
         ["/worker guide \"<additional system prompt>\"", "Persist the additional worker model-selection system prompt when its experiment is enabled."],
         ["/worker pause <agent_id>", "Pause a worker without killing its resumable session."],
         ["/worker resume <agent_id>", "Resume a paused worker session."],
@@ -351,7 +363,7 @@ module Meringue
       HEAD_PROPOSABLE_COMMANDS = %w[
         ListAll GetState GetInfo Help ListQuestions
         GetSessionDefaults GetModelCatalog SetDefaultSessionModel SetDefaultSessionThinkingLevel
-        AddProject ModifyProject CreateIssue ModifyIssue MoveWorker MoveIssue SpawnWorker PromptAgent SpawnHead NoOp
+        AddProject ModifyProject CreateIssue ModifyIssue MoveWorker MoveIssue MergeProject MergeIssue MergeWorker SplitProject SplitIssue SplitWorker SpawnWorker PromptAgent SpawnHead NoOp
         CreateGoal ModifyGoal StopGoal ListGoals
         AskQuestion AnswerQuestion DismissQuestion
         PauseWorker ResumeWorker ExportWorkers ImportWorkers SetAgentPruneProtection
