@@ -78,6 +78,7 @@ Suite conventions:
 - Every test file is named `*_test.rb`, starts with `require "test_helper"` (never `require_relative`), and defines a uniquely named `Minitest::Test` subclass so parallel work merges without class collisions.
 - Tests must be hermetic and fast: no network access, no real harness processes, no reliance on a developer's machine state. Write only inside `Dir.mktmpdir`, and never read or write `~/.meringue`. Use `Meringue::Harness::FakeClient` and `Meringue::Heads::FakeRunner` instead of real harnesses.
 - Never commit a failing or skipped test. If a test uncovers a real bug that is out of scope, assert the current actual behavior, note the bug explicitly in the test and in the PR description, and file the follow-up.
+- Match verification to risk: use the changed test file or `bundle exec rake test:smoke` for routine changes; add focused safety tests for state mutation, destructive confirmation, shell execution, worktree ownership, session routing, harness boundaries, or security policy. CI always runs all test files in eight shards, so speed must never come from removing valuable coverage.
 
 See `docs/testing.md` for the full guide, including what is intentionally not covered by automated tests.
 
