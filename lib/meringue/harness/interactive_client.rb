@@ -212,6 +212,10 @@ module Meringue
         transcript_schema.progress(events)
       end
 
+      def human_input_requests(events)
+        HumanInput.requests(events)
+      end
+
       def turn_outcome(session_ref)
         records = transcript_records(session_ref)
         return nil if records.empty?

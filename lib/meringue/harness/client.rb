@@ -132,6 +132,11 @@ module Meringue
         []
       end
 
+      # Returns harness-neutral requests that need a person before the turn can continue.
+      def human_input_requests(_events)
+        []
+      end
+
       # Harness-neutral outcome of the session's most recent turn.
       #
       # A session that is no longer streaming has not necessarily finished its

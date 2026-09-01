@@ -447,6 +447,13 @@ module Meringue
           "prompt_command_ids" => present_string(command_id) ? delivered_prompt_ids : nil,
           "prompt_delivery_claim" => nil
         ).compact
+        # The prompt landed, so the human-input request is answered and no longer needs an alert.
+        human_input_request = agent.dig("harness_metadata", "human_input_request")
+        if human_input_request.is_a?(Hash) && human_input_request.fetch("state", nil).to_s == "pending"
+          agent["harness_metadata"]["human_input_request"] = human_input_request.merge(
+            "state" => "answered", "answered_at" => now
+          )
+        end
         # The prompt landed, so a recorded dead-turn reason is history. Cleared after the merge
         # because the session ref carries the agent's own metadata back in.
         clear_settle_failure!(agent)

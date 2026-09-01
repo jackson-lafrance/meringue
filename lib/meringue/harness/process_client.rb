@@ -171,6 +171,10 @@ module Meringue
         SessionProgress.from_process_events(events)
       end
 
+      def human_input_requests(events)
+        HumanInput.requests(events)
+      end
+
       def attach_session(session_ref)
         session_ref.merge(
           "metadata" => metadata_with(session_ref, "attach_supported" => false, "attach_note" => "#{harness_name} terminal attach is handled by TerminalSessionOpener")
