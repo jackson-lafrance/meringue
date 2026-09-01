@@ -592,6 +592,10 @@ module Meringue
         source_project = find_project(state, source_project_id)
         return false unless source_project && target_project
 
+        source_identity = present_string(source_project.fetch("version_control_repository_identity", nil))
+        target_identity = present_string(target_project.fetch("version_control_repository_identity", nil))
+        return true if source_identity && target_identity && source_identity == target_identity
+
         source_root = present_string(source_project.fetch("root_path", nil))
         target_root = present_string(target_project.fetch("root_path", nil))
         return false unless source_root && target_root

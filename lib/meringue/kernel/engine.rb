@@ -267,6 +267,8 @@ module Meringue
           move_worker(command_id, command_type, payload)
         when "MoveIssue"
           move_issue(command_id, command_type, payload)
+        when "MergeProject", "MergeIssue", "MergeWorker", "SplitProject", "SplitIssue", "SplitWorker"
+          lifecycle_transfer(command_id, command_type, payload)
         when "SpawnWorker"
           spawn_worker(command_id, command_type, payload)
         when "PromptAgent"
@@ -348,6 +350,7 @@ require_relative "engine/head_results"
 require_relative "engine/head_sessions"
 require_relative "engine/interactive_focus"
 require_relative "engine/kill"
+require_relative "engine/lifecycle_transfer"
 require_relative "engine/projects_and_issues"
 require_relative "engine/prompting"
 require_relative "engine/prune"
