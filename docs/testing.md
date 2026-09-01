@@ -30,6 +30,22 @@ ruby -Ilib -Itest test/integration/foundation/cli_entrypoint_test.rb --name test
 
 Useful Minitest flags: `--name /pattern/` to filter by regexp, `--seed N` to reproduce an ordering, `--verbose` to list each test.
 
+Use the fast smoke tier for routine changes that do not touch the listed safety boundaries:
+
+```bash
+bundle exec rake test:smoke
+```
+
+The smoke tier checks command restrictions, delivery identity, input-to-kernel routing, destructive commands, and worktree isolation. It does not replace focused tests for the changed area.
+
+Run focused files directly for routine implementation work:
+
+```bash
+bundle exec ruby -Ilib -Itest test/integration/kernel_core/create_issue_test.rb
+```
+
+CI runs every test file, split across eight shards. Sharding reduces wall time only; it does not remove tests. Local shard reproduction uses `TEST_SHARDS=8 TEST_SHARD=1 bundle exec rake test`.
+
 Inside a bundle, prefix with `bundle exec` (`bundle exec rake test`).
 
 ## Layout
@@ -51,6 +67,16 @@ test/findings/                 # notes about real bugs found while writing tests
 - Tests are hermetic: no network, no real Pi, Claude Code, or Codex processes, no dependence on installed harness CLIs, and no reads or writes under `~/.meringue`. Use `Dir.mktmpdir` for any filesystem work, and `Meringue::Harness::FakeClient` / `Meringue::Heads::FakeRunner` for harness behavior.
 - Tests are fast and deterministic: no `sleep`-based coordination where an injected clock or a direct call will do, and no reliance on wall-clock ordering.
 - No failing tests and no `skip`. If a test reveals a real bug that is out of scope, assert the current actual behavior, say so in a comment, and record the bug in `test/findings/<area>.md`.
+
+## Verification policy
+
+Agents should choose the smallest tier that matches the risk:
+
+- Routine, localized changes: run the changed test file or `bundle exec rake test:smoke`.
+- Changes to state mutation, destructive confirmation, shell execution, worktree ownership, session routing, harness boundaries, or security policy: run the focused tests plus `bundle exec rake test:smoke`.
+- Changes that cross areas or affect shared infrastructure: run the full suite, or reproduce all eight CI shards.
+
+CI always runs the full suite on every supported Ruby version. No test file is excluded for speed. The smoke tier is a fast feedback check, not a coverage gate.
 
 ## Not covered on purpose
 
