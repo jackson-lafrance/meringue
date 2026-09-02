@@ -250,6 +250,11 @@ module Meringue
           err_reader = quiet_reader(stderr)
           begin
             status = Timeout.timeout(model_auth_timeout) { wait_thread.value }
+            # The child has exited, but its last write may still sit in the pipe: let the
+            # readers reach EOF before the pipes are closed under them, or a short answer
+            # is truncated and read as an invalid response. The bound only matters when a
+            # grandchild inherited the pipe and keeps it open.
+            [out_reader, err_reader].each { |reader| reader.join(AUTH_CHECK_DRAIN_TIMEOUT) }
           rescue Timeout::Error
             terminate_auth_check(wait_thread)
             status = nil

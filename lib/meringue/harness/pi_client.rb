@@ -69,6 +69,8 @@ module Meringue
       # inherit the long event timeout used for real agent turns.
       DEFAULT_MODEL_CATALOG_TIMEOUT = 30
       DEFAULT_MODEL_AUTH_TIMEOUT = 10
+      # How long to wait for an exited `pi auth check` to hand over its final output.
+      AUTH_CHECK_DRAIN_TIMEOUT = 1.0
       MAX_MODEL_AUTH_PROVIDERS = 128
       MODEL_AUTH_SOURCE = "pi_auth_check"
 
