@@ -13,6 +13,10 @@ require "support/kernel_maintenance_support"
 # pruned, project `P4` "World" survived, and the pass renames `P4` -> `P2`, `P4-I3` -> `P2-I2`,
 # and the live World worker `P4-I3-W1` -> `P2-I2-W1`, which is exactly the id the removed
 # Meringue worker's history still used.
+#
+# In prose that marking is deliberately limited to spellings the pass reuses. The removed issue
+# `P2-I3` is named in the fixture too, but no surviving record takes that id, so in text it stays
+# exactly as written (see recount_prose_test.rb for why: the same token may be the user's words).
 class KernelMaintenanceRecountHistoryTest < Minitest::Test
   include KernelMaintenanceSupport
 
@@ -201,14 +205,14 @@ class KernelMaintenanceRecountHistoryTest < Minitest::Test
   # --- the reported failure -------------------------------------------------------------
 
   def test_no_pre_recount_history_can_be_read_as_another_records_history
-    write_state(scrambled_history_state)
+    before = write_state(scrambled_history_state)
     engine = build_engine
 
     assert_equal "accepted", apply_command(engine, "Recount", {}).fetch("status")
 
     state = read_state
-    # Every id still spelled as a bare id names a record that exists right now.
-    assert_no_masquerading_ids(state)
+    # No spelling this pass renamed away survives as a bare id.
+    assert_no_masquerading_ids(state, before: before)
   end
 
   def test_removed_workers_completion_report_is_not_attached_to_the_worker_that_inherited_its_id
@@ -285,7 +289,9 @@ class KernelMaintenanceRecountHistoryTest < Minitest::Test
                  log_by_id(state, "L402").fetch("message")
     assert_equal ["P2-I2-W1 (old id)"], log_by_id(state, "L403").dig("details", "removed_worktree_agent_ids")
     assert_equal ["P2-I2 (old id)", "P2-I3 (old id)"], log_by_id(state, "L403").dig("details", "removed_issue_ids")
-    assert_equal "Answered question Q1 (old id) about P2-I3 (old id).", log_by_id(state, "L406").fetch("message")
+    # `Q1` is reused (Q3 -> Q1) so it is marked; `P2-I3` is reused by nothing, so in prose it stays
+    # as written, while the same id in a reference slot is still marked because a slot is never prose.
+    assert_equal "Answered question Q1 (old id) about P2-I3.", log_by_id(state, "L406").fetch("message")
     assert_equal "Q1 (old id)", log_by_id(state, "L406").dig("details", "question_id")
     assert_equal "/prompt P2-I2-W1 (old id) \"keep going\"", log_by_id(state, "L410").dig("details", "input")
     assert_equal "kill P2-I2-W1 (old id) please", state.dig("conversation", "messages").first.fetch("text")
@@ -293,20 +299,26 @@ class KernelMaintenanceRecountHistoryTest < Minitest::Test
     assert_equal "Pruned 2 issues, 1 project, and 0 standalone agents.", log_by_id(state, "L404").fetch("message")
   end
 
-  # The counters are rebuilt to the compacted range, so the next created record takes the next
-  # free number - which is exactly the id some pruned record's history used to spell.
-  def test_a_record_created_after_the_pass_does_not_inherit_a_removed_records_history
-    write_state(scrambled_history_state)
+  # A prose token this pass neither renames nor reuses is left exactly as written, even though the
+  # counters are rebuilt to the compacted range and the next created record takes the next free
+  # number - which can be the id a pruned record's history spells. That is the accepted cost of not
+  # editing user prose (`Prepare Q3 revenue report`) on a recount that renamed nothing near it:
+  # nothing in state can tell the two apart, and a pass marks only the ambiguity it creates itself.
+  # Reference slots are not prose and are still marked (see L403's `removed_issue_ids`).
+  def test_history_about_an_id_this_pass_neither_renames_nor_reuses_is_left_as_written
+    before = write_state(scrambled_history_state)
     engine = build_engine
     apply_command(engine, "Recount", {})
+    assert_equal "Pruned issue P2-I3.", log_by_id(read_state, "L405").fetch("message")
 
     created = apply_command(engine, "CreateIssue",
                             "project_id" => "P2", "title" => "New goal", "description" => "after recount")
 
     assert_equal "P2-I3", created.fetch("target_id")
     state = read_state
-    assert_equal "Pruned issue P2-I3 (old id).", log_by_id(state, "L405").fetch("message")
-    assert_no_masquerading_ids(state)
+    assert_equal "Pruned issue P2-I3.", log_by_id(state, "L405").fetch("message")
+    assert_equal ["P2-I2 (old id)", "P2-I3 (old id)"], log_by_id(state, "L403").dig("details", "removed_issue_ids")
+    assert_no_masquerading_ids(state, before: before)
   end
 
   # --- live records ---------------------------------------------------------------------
@@ -442,7 +454,7 @@ class KernelMaintenanceRecountHistoryTest < Minitest::Test
   end
 
   def test_a_second_pass_neither_re_marks_nor_re_maps_history
-    write_state(scrambled_history_state)
+    before = write_state(scrambled_history_state)
     engine = build_engine
     apply_command(engine, "Recount", {})
     first = read_state
@@ -457,7 +469,7 @@ class KernelMaintenanceRecountHistoryTest < Minitest::Test
       assert_equal log_by_id(first, log_id).fetch("details"), log_by_id(second, log_id).fetch("details")
     end
     refute_includes log_by_id(second, "L401").fetch("message"), "#{RETIRED_MARKER}#{RETIRED_MARKER}"
-    assert_no_masquerading_ids(second)
+    assert_no_masquerading_ids(second, before: before)
   end
 
   def test_recount_still_refuses_to_run_while_another_head_is_in_flight
@@ -559,12 +571,18 @@ class KernelMaintenanceRecountHistoryTest < Minitest::Test
     tokens
   end
 
-  def assert_no_masquerading_ids(state)
-    live = live_ids(state)
+  # A bare token is acceptable when it names no record before or after the pass (ordinary text the
+  # rewrite leaves alone) or when it names a live record (rewrite output, or an id the pass kept).
+  # What is never acceptable is the pre-pass spelling of a record this pass renamed: it names
+  # nothing afterwards and nothing legitimate can write it, so a survivor is a rewrite miss. Whether
+  # a live spelling is the rewrite's output or an unmarked reused id cannot be told apart here, so
+  # the reused ids (`P2`, `P2-I2`, `P2-I2-W1`, `P2-I2-W2`, `Q1`, `G1`) are pinned line by line above.
+  def assert_no_masquerading_ids(state, before:)
+    renamed_away = live_ids(before) - live_ids(state)
     history_strings(state).each do |path, text|
       unmarked_id_tokens(text).each do |token|
-        assert_includes live, token,
-                        "#{path} still spells #{token}, which no longer names the record it was written about: #{text.inspect}"
+        refute_includes renamed_away, token,
+                        "#{path} still spells #{token}, which this pass renamed away: #{text.inspect}"
       end
     end
   end

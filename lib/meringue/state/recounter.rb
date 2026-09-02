@@ -33,8 +33,15 @@ module Meringue
     #   * the record is gone: the bare spelling must stop resolving, because it is now free to be
     #     handed to someone else. In the live orchestration slots the kernel acts on it is cleared,
     #     exactly as dangling worker lineage links already were. In append-only history (log
-    #     routing, chat routing) and in text it is marked `(old id)`, so the line stays readable
-    #     and attributable to something historical while resolving to no record at all.
+    #     routing, chat routing) it is marked `(old id)`, so the line stays readable and
+    #     attributable to something historical while resolving to no record at all.
+    #
+    # Prose is the one place that rule has to be narrower. A structured slot holds an id or
+    # nothing, but an id-shaped token in a title or description may be the user's own words
+    # (`Prepare Q3 revenue report`, `the G2 Crowd review`), and nothing in state can tell those
+    # apart from a reference to a pruned question. So a prose token that names no record is marked
+    # only when this pass hands its spelling to a surviving record - the one case where leaving it
+    # bare would make it read as that record's history - and is otherwise left exactly as written.
     module Recounter
       # The state document itself is inconsistent in a way the user has to repair (an issue
       # whose project is gone, a worker whose issue is gone). Distinct from the `ArgumentError`
@@ -87,13 +94,18 @@ module Meringue
       # exactly as the user wrote it instead of being edited into a reference. A word character,
       # `-`, or `/` on either side also disqualifies a match, which is what keeps a branch name
       # (`meringue/fix-P3-I9-abc`), a model id (`glm-5p2-fast`), and a composite correlation id
-      # (`P1-I1-W1-PP1`, `G1-IT2-ATTEMPT`, `session-restart-P1-I1-W1-1`) intact.
+      # (`P1-I1-W1-PP1`, `G1-IT2-ATTEMPT`, `session-restart-P1-I1-W1-1`) intact. Matching is only
+      # the first half of the decision: a match that names no record before or after the pass is
+      # ordinary text (`Q3 revenue`, `G2 Crowd`) and `rewrite_text` leaves it alone.
       EMBEDDED_ID_PATTERN = %r{(?<![\w/-])(P\d+(?:-I\d+(?:-W\d+)?)?|Q\d+|G\d+)(?![\w/-])}
 
-      # Appended to an id that no longer names a record. Deliberately plain, and deliberately not a
-      # claim about *why*: the record may have been pruned or killed, or (in state written before
-      # this behavior existed) renamed by an earlier pass that left the text behind. What is always
-      # true is that the spelling is out of date and now resolves to nothing, which is the point.
+      # Appended to an id that no longer names the record it was written about. Deliberately plain,
+      # and deliberately not a claim about *why*: the record may have been pruned or killed, or (in
+      # state written before this behavior existed) renamed by an earlier pass that left the text
+      # behind. What is always true is that the spelling is out of date and, in a reference slot,
+      # now resolves to nothing. In prose it is narrower still: the marker is added only when this
+      # pass gives that exact spelling to a different record, because that is when the bare token
+      # would stop being harmless and start naming the wrong thing.
       RETIRED_ID_MARKER = " (old id)"
 
       module_function
@@ -126,7 +138,7 @@ module Meringue
         clean_agent_relationships!(state)
         rebuild_issue_agent_ids!(state)
         reset_counters!(state)
-        validate_integrity!(state, deferred_chains: deferred_chains)
+        validate_integrity!(state, deferred_chains: deferred_chains, stale_ids: stale_spellings(id_map))
 
         {
           "project_ids" => changed_entries(project_map),
@@ -226,10 +238,27 @@ module Meringue
       # a swap (P2 -> P1 while P4 -> P2) can never be applied twice to the same value - and neither
       # can a marker, which is what makes a second pass a no-op.
       def rewrite_ids!(state, id_map)
+        reused = reused_spellings(id_map)
         walk_references!(state) do |value, _path, reference, mode|
-          reference ? rewrite_reference_id(value, id_map, mode: mode) : rewrite_text(value, id_map)
+          reference ? rewrite_reference_id(value, id_map, mode: mode) : rewrite_text(value, id_map, reused)
         end
         state
+      end
+
+      # Spellings this pass hands to a record that did not hold them before: a value of the map that
+      # is not also a key. These are the only prose tokens that become ambiguous, so they are the
+      # only ones `rewrite_text` marks. Computed once per pass rather than per token.
+      def reused_spellings(id_map)
+        id_map.each_value.with_object({}) { |new_id, reused| reused[new_id] = true unless id_map.key?(new_id) }
+      end
+
+      # The mirror image, for the audit: spellings this pass renamed away and gave to no one. A key
+      # of the map that is not also a value names no record once the pass is done, and nothing
+      # legitimate can produce it either - rewrite output is always a value, and a token the
+      # rewrite deliberately leaves alone is never a key - so one still spelled bare is a miss.
+      def stale_spellings(id_map)
+        new_ids = id_map.each_value.to_h { |new_id| [new_id, true] }
+        id_map.each_key.with_object({}) { |old_id, stale| stale[old_id] = true unless new_ids.key?(old_id) }
       end
 
       # A structured id slot: exactly one record id, or nothing. When its record is gone the slot
@@ -243,17 +272,21 @@ module Meringue
       end
 
       # Human-readable text: log messages, issue titles and descriptions, worker prompts and
-      # reports, question context, goal directives, chat rows. The ids quoted here are references
-      # too - they are what the user reads and what a head or dependent worker is handed later - so
-      # they follow their record, or are marked when there is no longer a record to follow.
-      def rewrite_text(text, id_map)
+      # reports, question context, goal directives, chat rows. A token that names a record follows
+      # that record, because the text is what the user reads and what a head or dependent worker is
+      # handed later. A token that names no record is marked only if this pass hands its spelling to
+      # a surviving record (`reused`): left bare it would read as that record's history. A token
+      # that names nothing before or after the pass is left exactly as written - it cannot be
+      # mistaken for any record, and the recount has no business editing what may be the user's
+      # own words (`Prepare Q3 revenue report`) when it renamed nothing near it.
+      def rewrite_text(text, id_map, reused)
         return text unless text.match?(EMBEDDED_ID_PATTERN)
 
         text.gsub(EMBEDDED_ID_PATTERN) do |token|
           # Already annotated by an earlier pass: neither spelling nor marker may change again.
           next token if Regexp.last_match.post_match.start_with?(RETIRED_ID_MARKER)
 
-          id_map.fetch(token) { "#{token}#{RETIRED_ID_MARKER}" }
+          id_map.fetch(token) { reused.key?(token) ? "#{token}#{RETIRED_ID_MARKER}" : token }
         end
       end
 
@@ -348,17 +381,24 @@ module Meringue
       end
 
       # Every id still spelled anywhere in state that names no record, as
-      # `{ id => first path that spells it }`. Both shapes count: a whole reference slot, and an id
-      # quoted inside prose. An id already annotated with the retired marker is resolved by
-      # definition - it deliberately names nothing and can never be mistaken for a live record.
-      def unresolved_references(state)
+      # `{ id => first path that spells it }`. A reference slot (or an id-shaped hash key) must
+      # resolve outright: it holds an id or nothing, so anything unresolved there is a rewrite miss.
+      # Prose is judged against `stale_ids` instead of against the live tree, because a bare prose
+      # token that names no record is legal - it may be the user's own words, and `rewrite_text`
+      # deliberately leaves it alone - while an unmarked reused spelling is indistinguishable here
+      # from the rewrite's own output. What prose *can* be audited for without the pre-rewrite text
+      # is the spelling of a record this pass renamed away: it names nothing afterwards, nothing
+      # legitimate can write it, so its presence proves the rewrite skipped a token. An id already
+      # annotated with the retired marker is resolved by definition - it deliberately names nothing
+      # and can never be mistaken for a live record.
+      def unresolved_references(state, stale_ids = {})
         live = live_ids(state)
         found = {}
         walk_references!(state, visit_keys: true) do |value, path, reference, _mode|
           if reference
             found[value] ||= path if RENAMEABLE_ID_PATTERN.match?(value) && !live.key?(value)
           else
-            each_embedded_id(value) { |token| found[token] ||= path unless live.key?(token) }
+            each_embedded_id(value) { |token| found[token] ||= path if stale_ids.key?(token) }
           end
           value
         end
@@ -442,11 +482,11 @@ module Meringue
         end
       end
 
-      def validate_integrity!(state, deferred_chains: {})
+      def validate_integrity!(state, deferred_chains: {}, stale_ids: {})
         validate_unique_ids!(state)
         validate_tree_shape!(state)
         validate_deferred_chains!(state, deferred_chains)
-        validate_resolved_ids!(state)
+        validate_resolved_ids!(state, stale_ids)
         true
       end
 
@@ -558,13 +598,16 @@ module Meringue
       end
 
       # The catch-all, and the invariant the whole design exists for: when the pass is done, every
-      # id still spelled in state - in a reference slot or in prose - names a record that exists
-      # right now. Nothing is tolerated. A pre-existing dangling id is not an excuse to leave a
-      # bare id behind, because compaction is free to hand that exact spelling to another record,
-      # at which point the id stops dangling and starts lying; either the rewrite resolved it, or
-      # the marker retired it, or this refuses the pass rather than persisting misattribution.
-      def validate_resolved_ids!(state)
-        broken = unresolved_references(state)
+      # id held in a reference slot names a record that exists right now, and no prose still spells
+      # an id this pass renamed away. Nothing is tolerated in a slot: a pre-existing dangling id is
+      # not an excuse to leave a bare id behind, because compaction is free to hand that exact
+      # spelling to another record, at which point the id stops dangling and starts lying; either
+      # the rewrite resolved it, or the marker retired it, or this refuses the pass rather than
+      # persisting misattribution. Prose that names no record is not in scope here - see
+      # `unresolved_references` for why it cannot be audited after the fact and what is checked
+      # in its place.
+      def validate_resolved_ids!(state, stale_ids = {})
+        broken = unresolved_references(state, stale_ids)
         return true if broken.empty?
 
         details = broken.first(5).map { |value, path| "#{value} (#{path})" }.join(", ")
