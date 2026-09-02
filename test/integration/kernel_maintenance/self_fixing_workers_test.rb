@@ -106,6 +106,20 @@ class SelfFixingWorkersTest < Minitest::Test
     refute Meringue::Experiments::SelfFixingWorkers.claimable?(worker)
   end
 
+  def test_pending_human_input_does_not_trigger_recovery
+    state = initial_state
+    worker = state.fetch("agents").first
+    worker["status"] = "blocked"
+    worker["harness_metadata"] = {
+      "human_input_request" => { "state" => "pending", "source" => "approval_request" }
+    }
+    @store.save(state)
+
+    refute Meringue::Experiments::SelfFixingWorkers.claimable?(worker)
+    assert_empty @engine.send(:reconcile_self_fixing_workers)
+    assert_empty @spawned
+  end
+
   def test_focus_preparation_failure_alone_does_not_trigger_recovery
     state = initial_state
     worker = state.fetch("agents").first

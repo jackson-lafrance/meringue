@@ -37,4 +37,11 @@ class HumanInputDetectionTest < Minitest::Test
   def test_ignores_ordinary_tool_execution
     assert_empty Meringue::Harness::HumanInput.requests([{ "type" => "tool_execution_start", "name" => "bash" }])
   end
+
+  def test_ignores_unrelated_permission_and_approval_events
+    assert_empty Meringue::Harness::HumanInput.requests([
+      { "type" => "permission_denied", "message" => "The command was denied." },
+      { "type" => "tool_execution_end", "approval" => { "approved" => true } }
+    ])
+  end
 end
