@@ -31,13 +31,5 @@ Meringue does not ship a fake alternate backend or silently fall back to the pro
 Implementations must own locking, isolation evidence, bounded operations, and safe cleanup.
 Unknown or dirty workspaces must never be force-removed.
 
-## Worker delivery bases
-
-Worker delivery guidance applies before every push, regardless of pull-request conflict status. The
-worker fetches the target base branch and compares its commit with the last delivery baseline. If
-the base advanced, the worker rebases all worker commits onto the latest base before pushing. An
-unchanged base does not trigger a rebase. A conflicting rebase stops delivery with the workspace
-preserved and the exact conflict reported; workers never bypass the rebase or force-push a branch.
-
 Doctor reports backend capability failures. Project registration records the capability snapshot
 without requiring a forge origin; workers choose the strongest safe mode available.
