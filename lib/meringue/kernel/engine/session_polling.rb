@@ -181,7 +181,11 @@ module Meringue
         # of *their* exchange, not the end of the worker's assignment. A newly-started interactive
         # head is similarly not settled until its provider has had time to publish initial transcript
         # state (some harnesses can spend substantially longer in this phase than others).
+        # A human-input or approval event is a live request, not a finished turn. Keep it out of
+        # settle-failure classification even when the provider reports the session as completed.
         settled = completed_session?(state_ref) &&
+                  human_input_requests.empty? &&
+                  !human_input_pending?(agent) &&
                   !live_focus_attached?(agent) &&
                   !head_startup_grace_active?(agent, state_ref)
         assistant_text = settled ? safe_last_assistant_text(client, state_ref) : nil
