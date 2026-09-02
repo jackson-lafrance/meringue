@@ -875,8 +875,9 @@ module Meringue
         end
 
         def human_input_marker(worker)
-          marker = worker.dig("harness_metadata", "human_input_request")
-          marker.is_a?(Hash) && marker.fetch("state", nil).to_s == "pending" ? "needs input" : ""
+          return "" if %w[completed killed].include?(worker.fetch("status", nil).to_s)
+
+          Harness::HumanInput.pending_marker?(worker.dig("harness_metadata", "human_input_request")) ? "needs input" : ""
         end
 
         def worker_suffix(worker, _issue = nil)

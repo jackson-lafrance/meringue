@@ -363,7 +363,7 @@ module Meringue
 
       def human_input_pending?(agent)
         marker = (agent.fetch("harness_metadata", {}) || {}).fetch("human_input_request", nil)
-        marker.is_a?(Hash) && marker.fetch("state", nil).to_s == "pending"
+        Harness::HumanInput.pending_marker?(marker)
       end
 
       def refresh_agent_session_state_in(state, poll_result)

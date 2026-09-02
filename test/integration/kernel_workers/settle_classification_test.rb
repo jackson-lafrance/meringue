@@ -122,6 +122,55 @@ class KernelWorkersSettleClassificationTest < Minitest::Test
     assert_equal "blocked", issue(engine, context.fetch("issue_id")).fetch("status")
   end
 
+  # Pi's `setWidget` and other fire-and-forget UI calls arrive as `extension_ui_request` too.
+  # They used to block every session behind a `pending` marker that nothing could answer.
+  def test_fire_and_forget_extension_ui_request_does_not_block_worker
+    client = RecordingHarnessClient.new(provider: "pi")
+    client.last_assistant_text = "Done. The fix is in place."
+    client.events = [
+      { "type" => "extension_ui_request", "id" => "w1", "method" => "setWidget", "widgetKey" => "pi.precognition",
+        "widgetLines" => ["precog · watching · silent"], "widgetPlacement" => "aboveEditor" }
+    ]
+    client.define_singleton_method(:human_input_requests) do |events|
+      Meringue::Harness::HumanInput.requests(events)
+    end
+    engine, context, worker_id = build_worker(client)
+
+    result = apply!(engine, "ReconcileSessions", {})
+    poll = result.dig("result", "poll_results").first
+    worker = agent(engine, worker_id)
+
+    assert_equal "completed", poll.fetch("state")
+    assert_equal "completed", worker.fetch("status")
+    assert_nil worker.dig("harness_metadata", "human_input_request")
+    assert_equal "completed", issue(engine, context.fetch("issue_id")).fetch("status")
+  end
+
+  # State written before the dialog filter existed carries `setWidget` markers in `pending`.
+  # Reconciliation must read them as answered rather than keep the worker blocked forever.
+  def test_stale_fire_and_forget_marker_no_longer_blocks_settlement
+    client = RecordingHarnessClient.new(provider: "pi")
+    client.last_assistant_text = "Done. The fix is in place."
+    engine, context, worker_id = build_worker(client)
+    patch_state! do |state|
+      worker = state.fetch("agents").find { |record| record.fetch("id") == worker_id }
+      worker["status"] = "blocked"
+      worker["harness_metadata"]["human_input_request"] = {
+        "source" => "extension_ui_request", "request_type" => "extension_ui_request", "state" => "pending",
+        "message" => "Human input is needed.",
+        "details" => { "type" => "extension_ui_request", "method" => "setWidget", "widgetKey" => "pi.precognition" }
+      }
+    end
+    assert_equal "blocked", agent(engine, worker_id).fetch("status")
+
+    result = apply!(engine, "ReconcileSessions", {})
+    poll = result.dig("result", "poll_results").first
+
+    assert_equal "completed", poll.fetch("state")
+    assert_equal "completed", agent(engine, worker_id).fetch("status")
+    assert_equal "completed", issue(engine, context.fetch("issue_id")).fetch("status")
+  end
+
   def test_a_tool_call_that_stops_before_a_final_result_keeps_the_worker_recoverable
     engine, context, worker_id = build_worker(incomplete_turn_client)
 
