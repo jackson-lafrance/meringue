@@ -69,6 +69,8 @@ module Meringue
       # inherit the long event timeout used for real agent turns.
       DEFAULT_MODEL_CATALOG_TIMEOUT = 30
       DEFAULT_MODEL_AUTH_TIMEOUT = 10
+      # How long to wait for an exited `pi auth check` to hand over its final output.
+      AUTH_CHECK_DRAIN_TIMEOUT = 1.0
       MAX_MODEL_AUTH_PROVIDERS = 128
       MODEL_AUTH_SOURCE = "pi_auth_check"
 
@@ -123,7 +125,7 @@ module Meringue
       end
 
       attr_reader :command, :env, :session_dir, :command_timeout,
-                  :event_timeout, :shutdown_timeout
+                  :event_timeout, :shutdown_timeout, :model_auth_timeout
 
       def prompt_modes
         %w[normal steer follow_up]
@@ -138,9 +140,11 @@ module Meringue
                      event_timeout: DEFAULT_EVENT_TIMEOUT,
                      shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
                      transport_ownership: nil,
-                     takeover_settle_timeout: DEFAULT_TAKEOVER_SETTLE_TIMEOUT)
+                     takeover_settle_timeout: DEFAULT_TAKEOVER_SETTLE_TIMEOUT,
+                     model_auth_timeout: DEFAULT_MODEL_AUTH_TIMEOUT)
         @transport_ownership = transport_ownership || TransportOwnership.new
         @takeover_settle_timeout = Float(takeover_settle_timeout)
+        @model_auth_timeout = Float(model_auth_timeout)
         @command = command
         @env = env.transform_keys(&:to_s).transform_values(&:to_s)
         @extra_args = extra_args.map(&:to_s)
