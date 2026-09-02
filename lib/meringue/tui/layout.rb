@@ -401,7 +401,9 @@ module Meringue
 
         row_index = (y.to_i - rows.first.fetch(:y)).clamp(0, rows.length - 1)
         row = rows.fetch(row_index)
-        column = (x.to_i - view.fetch(:x)).clamp(0, row.fetch(:text).length)
+        # The pointer arrives in terminal cells; the content column is a character
+        # index, so a click on either half of a wide glyph lands on that glyph.
+        column = DisplayWidth.char_index_at(row.fetch(:text), [x.to_i - view.fetch(:x), 0].max)
         Selection.point(row.fetch(:line_index), column)
       end
 

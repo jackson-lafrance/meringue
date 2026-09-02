@@ -14,7 +14,7 @@ module Meringue
       end
 
       def write(x, y, text, max_width: nil, style: nil)
-        write_characters(x, y, sanitize(text).chars, max_width: max_width, style: style)
+        write_cells(x, y, DisplayWidth.cells(sanitize(text)), max_width: max_width, style: style)
       end
 
       def write_segments(x, y, segments, max_width:, default_style: nil)
@@ -24,10 +24,10 @@ module Meringue
 
         segments.each do |segment|
           text, style = segment_text_and_style(segment, default_style)
-          chars = sanitize(text).chars
-          next if chars.empty?
+          cells = DisplayWidth.cells(sanitize(text))
+          next if cells.empty?
 
-          written = write_characters(cursor, y, chars, max_width: remaining, style: style)
+          written = write_cells(cursor, y, cells, max_width: remaining, style: style)
           cursor += written
           remaining -= written
           break if remaining <= 0
@@ -91,25 +91,36 @@ module Meringue
       end
 
       # Canvas writes are rectangular array replacement, not a Ruby callback per
-      # terminal cell. Segment callers already sanitized and split their text, so
-      # accepting characters directly also prevents the old sanitize -> chars ->
-      # join -> sanitize -> chars round trip on every styled segment.
-      def write_characters(x, y, characters, max_width:, style:)
+      # terminal cell. Callers hand over DisplayWidth cells (one element per
+      # terminal column, "" for the second half of a wide glyph) so clipping,
+      # max_width, and the returned consumed count all measure what the terminal
+      # will actually draw rather than how many codepoints the text had.
+      def write_cells(x, y, cells, max_width:, style:)
         limit = max_width ? max_width.to_i : width
         return 0 if limit <= 0
 
-        consumed_width = [characters.length, limit].min
+        consumed_width = [cells.length, limit].min
         row = y.to_i
         return consumed_width if row.negative? || row >= height
 
         column = x.to_i
         visible_start = [0, -column].max
-        visible_width = [limit - visible_start, width - [column, 0].max, characters.length - visible_start].min
+        visible_width = [limit - visible_start, width - [column, 0].max, cells.length - visible_start].min
         return consumed_width if visible_width <= 0
 
         start_column = [column, 0].max
-        visible = characters[visible_start, visible_width]
-        @chars[row][start_column, visible_width] = visible
+        visible = cells[visible_start, visible_width]
+        # A wide glyph cut in half at either clip edge would still render two
+        # columns and push the rest of the row over; draw a blank in its place.
+        visible[0] = " " if visible[0].empty?
+        visible[-1] = " " if cells[visible_start + visible_width] == ""
+        row_cells = @chars[row]
+        # The same applies to a wide glyph already on the canvas whose head or
+        # continuation cell this write overwrites.
+        row_cells[start_column - 1] = " " if start_column.positive? && row_cells[start_column] == ""
+        finish_column = start_column + visible_width
+        row_cells[finish_column] = " " if finish_column < width && row_cells[finish_column] == ""
+        row_cells[start_column, visible_width] = visible
         @styles[row][start_column, visible_width] = Array.new(visible_width, style)
         consumed_width
       end
@@ -144,29 +155,33 @@ module Meringue
         # keystroke; the scalability benchmark did not see it because it forced
         # NO_COLOR. Emit complete same-style runs instead, keeping work tied to
         # rendered segments rather than viewport area.
+        #
+        # Runs are joined from the cell array rather than sliced out of a joined
+        # string: a cell may hold "" (the tail of a wide glyph) or several
+        # codepoints (a base character plus combining marks), so cell indexes
+        # are not character indexes.
         rendered = String.new
-        plain = row.join
         run_start = 0
         current_style = styles.first
         index = 1
         while index < row.length
           next_style = styles[index]
           if next_style != current_style
-            append_styled_run(rendered, plain, run_start, index, current_style)
+            append_styled_run(rendered, row, run_start, index, current_style)
             rendered << Style::RESET if current_style
             run_start = index
             current_style = next_style
           end
           index += 1
         end
-        append_styled_run(rendered, plain, run_start, row.length, current_style)
+        append_styled_run(rendered, row, run_start, row.length, current_style)
         rendered << Style::RESET if current_style
         rendered
       end
 
-      def append_styled_run(rendered, plain_row, start_index, end_index, style)
+      def append_styled_run(rendered, row, start_index, end_index, style)
         rendered << style if style
-        rendered << plain_row[start_index...end_index]
+        rendered << row[start_index...end_index].join
       end
     end
   end
