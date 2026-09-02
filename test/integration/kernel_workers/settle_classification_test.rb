@@ -101,6 +101,27 @@ class KernelWorkersSettleClassificationTest < Minitest::Test
     end
   end
 
+  def test_human_input_request_blocks_worker_without_settling_or_recovering
+    client = RecordingHarnessClient.new(provider: "pi")
+    client.events = [{ "type" => "approval_request", "message" => "Approve the command" }]
+    client.define_singleton_method(:human_input_requests) do |events|
+      Meringue::Harness::HumanInput.requests(events)
+    end
+    engine, context, worker_id = build_worker(client)
+
+    result = apply!(engine, "ReconcileSessions", {})
+    poll = result.dig("result", "poll_results").first
+    worker = agent(engine, worker_id)
+
+    assert_equal "working", poll.fetch("state")
+    assert_equal "blocked", worker.fetch("status")
+    assert_equal "pending", worker.dig("harness_metadata", "human_input_request", "state")
+    assert_equal "Approve the command", worker.dig("harness_metadata", "human_input_request", "message")
+    assert_nil worker.dig("harness_metadata", "settle_failure")
+    assert_nil worker.dig("harness_metadata", "self_fixing_recovery")
+    assert_equal "blocked", issue(engine, context.fetch("issue_id")).fetch("status")
+  end
+
   def test_a_tool_call_that_stops_before_a_final_result_keeps_the_worker_recoverable
     engine, context, worker_id = build_worker(incomplete_turn_client)
 

@@ -24,6 +24,7 @@ module Meringue
         metadata = worker.fetch("harness_metadata", {}) || {}
         metadata = {} unless metadata.is_a?(Hash)
         return false if focus_preparation_failed_without_settle_failure?(metadata)
+        return false if human_input_pending?(metadata)
 
         !metadata.key?(RECOVERY_CHILD_METADATA_KEY) && recovery_record(worker).fetch("source_worker_id", nil).to_s.empty?
       end
@@ -32,6 +33,11 @@ module Meringue
         handoff = metadata.fetch("last_interactive_handoff", nil)
         handoff.is_a?(Hash) && handoff.fetch("outcome", nil).to_s == "prepare_failed" &&
           !metadata.fetch("settle_failure", nil).is_a?(Hash)
+      end
+
+      def human_input_pending?(metadata)
+        request = metadata.fetch("human_input_request", nil)
+        request.is_a?(Hash) && request.fetch("state", nil).to_s == "pending"
       end
 
       def recovery_record(worker)

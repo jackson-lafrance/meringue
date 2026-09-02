@@ -19,7 +19,7 @@ module Meringue
 
         record = event["data"].is_a?(Hash) ? event["data"] : event
         type = record["type"].to_s
-        source = if REQUEST_TYPES.include?(type) || type.match?(/(?:approval|permission|human.?input)/i)
+        source = if REQUEST_TYPES.include?(type)
                    type
                  elsif approval_flag?(record)
                    "dangerous_command_approval"
@@ -38,8 +38,7 @@ module Meringue
       end
 
       def approval_flag?(record)
-        APPROVAL_KEYS.any? { |key| record[key] == true || record[key].to_s.downcase == "true" } ||
-          record["approval"].is_a?(Hash) || record["permission"].is_a?(Hash)
+        APPROVAL_KEYS.any? { |key| record[key] == true || record[key].to_s.downcase == "true" }
       end
 
       def compact(value)

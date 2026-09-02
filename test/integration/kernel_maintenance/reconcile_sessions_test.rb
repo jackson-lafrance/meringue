@@ -57,6 +57,28 @@ class KernelMaintenanceReconcileSessionsTest < Minitest::Test
     )
   end
 
+  def test_human_input_request_blocks_without_recording_a_settle_failure
+    state_with_worker(pid: Process.pid.to_s, session_file: live_session_file)
+    engine, client = stub_engine({
+      "sess-1" => {
+        "completed" => true,
+        "events" => [{ "type" => "tool_execution_start", "command" => "rm -rf tmp", "requiresApproval" => true }]
+      }
+    })
+    client.define_singleton_method(:human_input_requests) do |events|
+      Meringue::Harness::HumanInput.requests(events)
+    end
+
+    result = apply_command(engine, "ReconcileSessions", {})
+
+    poll = result.dig("result", "poll_results").first
+    worker = agent_by_id(read_state, "P1-I1-W1")
+    assert_equal "working", poll.fetch("state")
+    assert_equal "blocked", worker.fetch("status")
+    assert_equal "dangerous_command_approval", worker.dig("harness_metadata", "human_input_request", "source")
+    assert_nil worker.dig("harness_metadata", "settle_failure")
+  end
+
   def test_streaming_session_keeps_the_worker_working_and_marks_it_healthy
     state_with_worker(pid: Process.pid.to_s, session_file: live_session_file)
     engine, client = stub_engine({ "sess-1" => { "streaming" => true, "events" => [{ "type" => "agent_start" }] } })
