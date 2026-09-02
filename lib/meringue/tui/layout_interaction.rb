@@ -716,18 +716,26 @@ module Meringue
         return unless selection
 
         text = line_plain_text(line)
-        visible_length = [text.length, content_width].min
+        # Selection columns are character indexes into the content line, while
+        # the canvas restyles terminal cells; convert at this boundary so a
+        # highlighted wide glyph covers both of its cells.
+        visible_length = DisplayWidth.char_index_at(text, content_width)
         columns = Selection.columns_for(selection, line_index, visible_length)
-        canvas.restyle(x + columns.first, y, columns.size, Style::SELECTION) if columns
-        highlight_selection_cursor(canvas, x, y, content_width, line_index, selection)
+        if columns
+          start_cell = DisplayWidth.width(text[0, columns.first])
+          finish_cell = DisplayWidth.width(text[0, columns.end])
+          canvas.restyle(x + start_cell, y, finish_cell - start_cell, Style::SELECTION)
+        end
+        highlight_selection_cursor(canvas, x, y, content_width, text, line_index, selection)
       end
 
-      def highlight_selection_cursor(canvas, x, y, content_width, line_index, selection)
+      def highlight_selection_cursor(canvas, x, y, content_width, text, line_index, selection)
         cursor = selection.fetch("cursor", nil)
         return unless cursor.is_a?(Hash)
         return unless cursor.fetch("line", -1).to_i == line_index
 
-        column = cursor.fetch("column", 0).to_i.clamp(0, [content_width - 1, 0].max)
+        column = DisplayWidth.width(text[0, cursor.fetch("column", 0).to_i.clamp(0, text.length)])
+        column = column.clamp(0, [content_width - 1, 0].max)
         canvas.restyle(x + column, y, 1, Style.selection_cursor)
       end
 
