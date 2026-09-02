@@ -5,9 +5,11 @@ require "support/kernel_maintenance_support"
 
 # Id-shaped tokens in prose are not always ids. `Prepare Q3 revenue report` and `the G2 Crowd
 # review` are the user's words, and a recount that renamed nothing must not edit them into
-# `Q3 (old id)`. The line between prose and reference is drawn by the pass itself: a token is
-# marked only when the recount hands that exact spelling to a surviving record, because that is the
-# one case where leaving it bare would make it read as that record's history.
+# `Q3 (old id)`. A token that names no record is marked only on evidence that it is a reference:
+# the recount hands that exact spelling to a surviving record (left bare it would read as that
+# record's history), or the kernel itself stored the spelling in a reference slot somewhere in
+# state (`removed_issue_ids`, a log's `source_id`), which is how a pruned record's own history keeps
+# its marker even when nothing takes its id.
 class KernelMaintenanceRecountProseTest < Minitest::Test
   include KernelMaintenanceSupport
 
@@ -90,6 +92,35 @@ class KernelMaintenanceRecountProseTest < Minitest::Test
     assert_equal "Treat as P1 priority; see the G2 (old id) Crowd review.", issue.fetch("description")
   end
 
+  # The kernel writes an id into a slot only when it means a record, so a slot value is evidence
+  # that the same token in prose is a reference. Here nothing reuses `P1-I3`, but the prune log's
+  # `removed_issue_ids` names it, so the line about it is marked - and the user's `Q3` in the same
+  # line is not, because no slot anywhere holds `Q3`.
+  def test_prose_is_marked_when_the_kernel_stored_the_same_spelling_in_a_reference_slot
+    state = state_fixture(
+      projects: [project_record(id: "P1", name: "Reports", status: "working")],
+      issues: [issue_record(id: "P1-I1", project_id: "P1", title: TITLE, status: "working")],
+      logs: [
+        log_record(id: "L1", message: "Pruned issue P1-I3 (Q3 report follow-up).",
+                   details: { "removed_issue_ids" => ["P1-I3"] }),
+        log_record(id: "L2", message: "Pruned issue P1-I3.")
+      ]
+    )
+    write_state(state)
+    engine = build_engine
+
+    result = apply_command(engine, "Recount", {})
+
+    assert_equal "accepted", result.fetch("status"), result.fetch("message")
+    logs = read_state.fetch("logs")
+    pruned = logs.find { |log| log.fetch("id") == "L1" }
+    assert_equal "Pruned issue P1-I3 (old id) (Q3 report follow-up).", pruned.fetch("message")
+    assert_equal ["P1-I3 (old id)"], pruned.dig("details", "removed_issue_ids")
+    # The evidence is document-wide: the second line has no slot of its own and is still marked.
+    assert_equal "Pruned issue P1-I3 (old id).", logs.find { |log| log.fetch("id") == "L2" }.fetch("message")
+    assert_equal TITLE, issue_by_id(read_state, "P1-I1").fetch("title")
+  end
+
   def test_a_second_pass_leaves_untouched_prose_untouched
     write_state(prose_only_state)
     engine = build_engine
@@ -118,9 +149,10 @@ class KernelMaintenanceRecountProseTest < Minitest::Test
     refute_includes second.fetch("title"), "(old id) (old id)"
   end
 
-  # The audit no longer treats every bare prose token as a reference, but it still catches the one
-  # prose failure that can be proven after the fact: a spelling this pass renamed away and gave to
-  # no record. Nothing legitimate can write that token, so its presence means the rewrite missed it.
+  # The audit no longer treats every bare prose token as a reference, but it still catches the prose
+  # failure that can be proven after the fact: a spelling this pass renamed away (or retired from a
+  # slot) and gave to no record. Nothing legitimate can write that token, so its presence means the
+  # rewrite missed it.
   def test_the_audit_still_fails_prose_that_spells_an_id_the_pass_renamed_away
     state = Meringue::State::Models.ensure_state_shape!(
       state_fixture(
