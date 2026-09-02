@@ -8,6 +8,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Fixed
 
+- A workspace manager declared with `**options` (one that wraps or decorates the real manager) no
+  longer fails every worker at provisioning with `missing keywords: :project_root, :project_id,
+  :issue_id, :agent_id`. The kernel read its parameter list as "accepts no keyword" instead of
+  "accepts every keyword" and stripped the required ones before calling it.
+- An unmatched quote in a command setting such as `harnesses.pi.command` is reported as that
+  field's validation error instead of failing the whole save with `Kernel command failed:
+  uninitialized constant Shellwords::ParseError`. Two `rescue` clauses named that constant, which
+  Ruby does not define; a mis-namespaced `Meringue::Harness::MissingProviderError` in the kernel's
+  configuration code had the same latent shape. A foundation test now resolves every constant in
+  a `rescue` list or a `raise` from its lexical scope so a typo there fails in CI rather than in
+  the one failure path nobody exercised.
+- A supervisor handoff that times out waiting for a session to settle raises
+  `Supervisor::TransientError`, which the kernel retries, instead of `NameError` (Pi adapter) or
+  `TypeError: exception class/object expected` (interactive adapters): both raised the
+  `TransientSessionError` marker module rather than an error class.
+- `/recount` no longer edits ordinary text that only looks like an id. A recount that renamed
+  nothing turned the issue title `Prepare Q3 revenue report` into `Prepare Q3 (old id) revenue
+  report`. A prose token that names no record is now marked only on evidence that it is a
+  reference: the pass hands that spelling to a surviving record, or the kernel stored the same
+  spelling in a reference slot such as a prune log's `removed_issue_ids`. Reference slots keep
+  their existing clearing and marking.
+- The dashboard measures text in terminal cells instead of codepoints. A Japanese issue title or
+  an emoji in a log line (`✅` included) used to render an 80-column frame as 93 or 106 cells,
+  so the terminal wrapped the row and displaced every border after it. Wide characters now
+  occupy two cells, combining marks and joiners none, and a wide character that would straddle
+  a pane edge is blanked rather than drawn half off-screen.
+- The model catalog's per-provider `pi auth check` is bounded by a real process timeout. It was
+  wrapped in `Timeout.timeout` around `Open3.capture3`, whose cleanup joins the child in the
+  calling thread, so a hung check stalled the whole refresh for as long as the child lived and
+  printed thread backtraces over the screen. The child is now terminated at the deadline and
+  reported as `auth_check_timed_out`; a non-zero exit with no JSON is `auth_check_failed`.
 - Pi heads and workers no longer show as blocked, `needs input`, or `retry me` because an
   extension drew a status widget. Pi emits every `ctx.ui.*` call as an `extension_ui_request`,
   and Meringue read all of them as a dialog waiting for a person, so a `setWidget` from an
