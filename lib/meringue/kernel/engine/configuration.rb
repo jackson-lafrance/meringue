@@ -543,7 +543,7 @@ module Meringue
         values = providers.each_with_object({}) do |(role, provider), changes|
           defaults = begin
             defaults_registry.session_defaults(provider: provider)
-          rescue ArgumentError, Meringue::Harness::MissingProviderError
+          rescue ArgumentError # includes Registry::MissingProviderError
             nil
           end
           role_defaults = defaults&.fetch("roles", {})&.fetch(role, {}) || {}
@@ -579,7 +579,7 @@ module Meringue
 
       def safely_configured_provider(registry, role)
         role == "head" ? registry.head_provider : registry.worker_provider
-      rescue ArgumentError, Meringue::Harness::MissingProviderError
+      rescue ArgumentError # includes Registry::MissingProviderError
         nil
       end
     end

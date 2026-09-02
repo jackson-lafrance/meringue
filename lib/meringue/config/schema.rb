@@ -129,7 +129,9 @@ module Meringue
         else
           Config.deep_copy(value)
         end
-      rescue JSON::ParserError, Shellwords::ParseError => e
+      rescue JSON::ParserError => e
+        # Shellwords.split already raises ArgumentError on an unmatched quote, so only JSON needs
+        # translating into the class validate_changes reports per field.
         raise ArgumentError, e.message
       end
 

@@ -296,7 +296,7 @@ module Meringue
                     text.to_s
                   end
           set(id, value)
-        rescue ArgumentError, JSON::ParserError, Shellwords::ParseError => e
+        rescue ArgumentError, JSON::ParserError => e
           errors[id.to_s] = e.message
           nil
         end

@@ -122,7 +122,7 @@ module Meringue
         deadline = monotonic_time + Float(timeout)
         loop do
           return [get_state(session_ref)] unless streaming?(session_ref)
-          raise TransientSessionError, "Pi session did not settle before handoff timeout" if monotonic_time >= deadline
+          raise TransientError, "Pi session did not settle before handoff timeout" if monotonic_time >= deadline
 
           sleep HANDOFF_POLL_INTERVAL
         end

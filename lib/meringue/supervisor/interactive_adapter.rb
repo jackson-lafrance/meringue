@@ -100,7 +100,7 @@ module Meringue
         deadline = monotonic_time + Float(timeout)
         loop do
           return [get_state(session_ref)] unless streaming?(session_ref)
-          raise Harness::TransientSessionError, "#{harness_name} session did not settle before handoff timeout" if monotonic_time >= deadline
+          raise TransientError, "#{harness_name} session did not settle before handoff timeout" if monotonic_time >= deadline
 
           sleep HANDOFF_POLL_INTERVAL
         end
