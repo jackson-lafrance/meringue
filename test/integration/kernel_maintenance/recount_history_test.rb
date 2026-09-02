@@ -13,6 +13,11 @@ require "support/kernel_maintenance_support"
 # pruned, project `P4` "World" survived, and the pass renames `P4` -> `P2`, `P4-I3` -> `P2-I2`,
 # and the live World worker `P4-I3-W1` -> `P2-I2-W1`, which is exactly the id the removed
 # Meringue worker's history still used.
+#
+# In prose that marking needs evidence that a token is a reference and not the user's own words
+# (see recount_prose_test.rb): the pass hands its spelling to a surviving record, or the kernel
+# stored that spelling in a reference slot. The removed issue `P2-I3` is taken by nobody here, but
+# the prune log's `removed_issue_ids` names it, so its history is still marked.
 class KernelMaintenanceRecountHistoryTest < Minitest::Test
   include KernelMaintenanceSupport
 
@@ -201,14 +206,14 @@ class KernelMaintenanceRecountHistoryTest < Minitest::Test
   # --- the reported failure -------------------------------------------------------------
 
   def test_no_pre_recount_history_can_be_read_as_another_records_history
-    write_state(scrambled_history_state)
+    before = write_state(scrambled_history_state)
     engine = build_engine
 
     assert_equal "accepted", apply_command(engine, "Recount", {}).fetch("status")
 
     state = read_state
-    # Every id still spelled as a bare id names a record that exists right now.
-    assert_no_masquerading_ids(state)
+    # No spelling this pass renamed away survives as a bare id.
+    assert_no_masquerading_ids(state, before: before)
   end
 
   def test_removed_workers_completion_report_is_not_attached_to_the_worker_that_inherited_its_id
@@ -285,6 +290,8 @@ class KernelMaintenanceRecountHistoryTest < Minitest::Test
                  log_by_id(state, "L402").fetch("message")
     assert_equal ["P2-I2-W1 (old id)"], log_by_id(state, "L403").dig("details", "removed_worktree_agent_ids")
     assert_equal ["P2-I2 (old id)", "P2-I3 (old id)"], log_by_id(state, "L403").dig("details", "removed_issue_ids")
+    # `Q1` is reused (Q3 -> Q1); `P2-I3` is reused by nothing but sits in L403's `removed_issue_ids`
+    # slot, which is the kernel saying it was an id. Both are marked.
     assert_equal "Answered question Q1 (old id) about P2-I3 (old id).", log_by_id(state, "L406").fetch("message")
     assert_equal "Q1 (old id)", log_by_id(state, "L406").dig("details", "question_id")
     assert_equal "/prompt P2-I2-W1 (old id) \"keep going\"", log_by_id(state, "L410").dig("details", "input")
@@ -294,9 +301,11 @@ class KernelMaintenanceRecountHistoryTest < Minitest::Test
   end
 
   # The counters are rebuilt to the compacted range, so the next created record takes the next
-  # free number - which is exactly the id some pruned record's history used to spell.
+  # free number - which is exactly the id some pruned record's history used to spell. No surviving
+  # record takes `P2-I3` in this pass, so the marker here rests on the prune log having recorded
+  # `P2-I3` in its `removed_issue_ids` slot: the kernel's own evidence that the token is an id.
   def test_a_record_created_after_the_pass_does_not_inherit_a_removed_records_history
-    write_state(scrambled_history_state)
+    before = write_state(scrambled_history_state)
     engine = build_engine
     apply_command(engine, "Recount", {})
 
@@ -306,7 +315,8 @@ class KernelMaintenanceRecountHistoryTest < Minitest::Test
     assert_equal "P2-I3", created.fetch("target_id")
     state = read_state
     assert_equal "Pruned issue P2-I3 (old id).", log_by_id(state, "L405").fetch("message")
-    assert_no_masquerading_ids(state)
+    assert_equal ["P2-I2 (old id)", "P2-I3 (old id)"], log_by_id(state, "L403").dig("details", "removed_issue_ids")
+    assert_no_masquerading_ids(state, before: before)
   end
 
   # --- live records ---------------------------------------------------------------------
@@ -442,7 +452,7 @@ class KernelMaintenanceRecountHistoryTest < Minitest::Test
   end
 
   def test_a_second_pass_neither_re_marks_nor_re_maps_history
-    write_state(scrambled_history_state)
+    before = write_state(scrambled_history_state)
     engine = build_engine
     apply_command(engine, "Recount", {})
     first = read_state
@@ -457,7 +467,7 @@ class KernelMaintenanceRecountHistoryTest < Minitest::Test
       assert_equal log_by_id(first, log_id).fetch("details"), log_by_id(second, log_id).fetch("details")
     end
     refute_includes log_by_id(second, "L401").fetch("message"), "#{RETIRED_MARKER}#{RETIRED_MARKER}"
-    assert_no_masquerading_ids(second)
+    assert_no_masquerading_ids(second, before: before)
   end
 
   def test_recount_still_refuses_to_run_while_another_head_is_in_flight
@@ -559,13 +569,36 @@ class KernelMaintenanceRecountHistoryTest < Minitest::Test
     tokens
   end
 
-  def assert_no_masquerading_ids(state)
+  # A bare token is acceptable when it names a live record (rewrite output, or an id the pass kept)
+  # or when nothing in state ever treated it as an id (ordinary text the rewrite leaves alone). What
+  # is never acceptable is a spelling that names nothing afterwards and that the state itself vouched
+  # for as an id: the pre-pass spelling of a record this pass renamed, or a value the kernel held in
+  # a reference slot before the pass. Whether a live spelling is the rewrite's output or an unmarked
+  # reused id cannot be told apart here, so the reused ids (`P2`, `P2-I2`, `P2-I2-W1`, `P2-I2-W2`,
+  # `Q1`, `G1`) are pinned line by line above.
+  def assert_no_masquerading_ids(state, before:)
     live = live_ids(state)
+    retired = (live_ids(before) | reference_slot_values(before).to_set) - live
     history_strings(state).each do |path, text|
       unmarked_id_tokens(text).each do |token|
-        assert_includes live, token,
-                        "#{path} still spells #{token}, which no longer names the record it was written about: #{text.inspect}"
+        refute_includes retired, token,
+                        "#{path} still spells #{token}, which names no record any more: #{text.inspect}"
       end
+    end
+  end
+
+  # Every id-shaped value stored under an `id`/`*_id`/`*_ids` key anywhere in the fixture: the
+  # test's own reading of "the kernel wrote this as an id", independent of the implementation.
+  def reference_slot_values(node, key = nil)
+    case node
+    when Hash
+      node.flat_map { |child_key, child| reference_slot_values(child, child_key.to_s) }
+    when Array
+      node.flat_map { |child| reference_slot_values(child, key) }
+    when String
+      key && (key == "id" || key.end_with?("_id", "_ids")) && node.match?(/\A(?:P\d+(?:-I\d+(?:-W\d+)?)?|Q\d+|G\d+)\z/) ? [node] : []
+    else
+      []
     end
   end
 end
