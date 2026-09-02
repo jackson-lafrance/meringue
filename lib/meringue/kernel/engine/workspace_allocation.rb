@@ -300,14 +300,21 @@ module Meringue
           worktree_provider_command: project ? project.fetch("worktree_provider_command", nil) : nil,
           worktree_provider_fallback: project ? project.fetch("worktree_provider_fallback", nil) : nil
         }
-        supported_keywords = workspace_manager.method(:allocate_worker_workspace).parameters.filter_map do |kind, name|
-          name if [:key, :keyreq].include?(kind)
+        # A workspace manager double (or an older implementation) may not accept every keyword,
+        # so only the ones its signature names are passed. A manager declared with `**options`
+        # (one wrapping or decorating the real manager) names none of them yet accepts them all;
+        # withholding its required keywords would fail every worker at provisioning.
+        parameters = workspace_manager.method(:allocate_worker_workspace).parameters
+        accepts_any_keyword = parameters.any? { |(kind, _name)| kind == :keyrest }
+        supported_keywords = parameters.filter_map { |kind, name| name if [:key, :keyreq].include?(kind) }
+        unless accepts_any_keyword
+          arguments.delete_if { |name, _value| name != :task_title && !supported_keywords.include?(name) }
         end
-        arguments.delete_if { |name, _value| name != :task_title && !supported_keywords.include?(name) }
-        arguments[:unavailable_paths] = unavailable_paths if supported_keywords.include?(:unavailable_paths)
+        if accepts_any_keyword || supported_keywords.include?(:unavailable_paths)
+          arguments[:unavailable_paths] = unavailable_paths
+        end
         return workspace_manager.allocate_worker_workspace(**arguments) unless progress_agent_id
-        unless workspace_manager.method(:allocate_worker_workspace).parameters.any? { |(_kind, name)| name == :progress }
-          # A workspace manager double (or an older implementation) may not accept `progress`.
+        unless accepts_any_keyword || parameters.any? { |(_kind, name)| name == :progress }
           # Provisioning must never fail because progress reporting is unavailable.
           return workspace_manager.allocate_worker_workspace(**arguments)
         end
