@@ -766,12 +766,12 @@ module Meringue
             source.split(/\s+/).each_with_object([+""]) do |word, lines|
               if lines.last.empty?
                 lines[-1] = +word
-              elsif lines.last.length + word.length + 1 <= limit
+              elsif DisplayWidth.width(lines.last) + DisplayWidth.width(word) + 1 <= limit
                 lines.last << " " << word
               else
                 lines << +word
               end
-            end.flat_map { |line| line.length <= limit ? [line] : line.scan(/.{1,#{limit}}/) }
+            end.flat_map { |line| DisplayWidth.width(line) <= limit ? [line] : DisplayWidth.slices(line, limit) }
           end
         end
 

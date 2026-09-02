@@ -137,19 +137,56 @@ module Meringue
       # Longest prefix that fits in +cells+ without splitting a wide character.
       def truncate(text, cells)
         text = text.to_s
+        text[0, fit_length(text, cells)]
+      end
+
+      # Number of leading characters that fit in +cells+: the character count of
+      # `truncate`, for wrappers that slice by character offset but budget by
+      # column. Zero-width characters ride with the character before them, so a
+      # combining mark or variation selector is never split from its base.
+      #
+      # With +at_least_one+, a glyph too wide for the budget is still counted
+      # (a wide character in a one-cell row), so a wrapper that must make
+      # progress never gets 0 back for nonempty text and can never loop.
+      def fit_length(text, cells, at_least_one: false)
+        text = text.to_s
         limit = cells.to_i
-        return "" if limit <= 0
-        return text[0, limit] if text.ascii_only?
+        return 0 if text.empty? || (limit <= 0 && !at_least_one)
+        return limit.clamp(at_least_one ? 1 : 0, text.length) if text.ascii_only?
 
         used = 0
-        prefix = +""
-        each_cell_width(text) do |char, char_cells|
-          break if used + char_cells > limit
+        count = 0
+        each_cell_width(text) do |_char, char_cells|
+          break if char_cells.positive? && used + char_cells > limit && !(at_least_one && used.zero?)
 
           used += char_cells
-          prefix << char
+          count += 1
         end
-        prefix
+        count
+      end
+
+      # Hard-wraps +text+ into pieces of at most +cells+ columns, never splitting
+      # a character; the cell-aware `text.scan(/.{1,cells}/)`.
+      def slices(text, cells)
+        text = text.to_s
+        pieces = []
+        until text.empty?
+          take = fit_length(text, cells, at_least_one: true)
+          pieces << text[0, take]
+          text = text[take..].to_s
+        end
+        pieces
+      end
+
+      # Cells added by each character, in order, so a wrapper that tracks its
+      # own character array (styled characters, say) can budget by column.
+      def char_widths(text)
+        text = text.to_s
+        return Array.new(text.length, 1) if text.ascii_only?
+
+        widths = []
+        each_cell_width(text) { |_char, char_cells| widths << char_cells }
+        widths
       end
 
       def ljust(text, cells, pad = " ")

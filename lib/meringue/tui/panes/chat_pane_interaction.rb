@@ -506,6 +506,9 @@ module Meringue
           wrap_segments(segments, width)
         end
 
+        # `width` and `remaining` are terminal cells: a wide character that does
+        # not fit in the cells left on a row starts the next row instead of being
+        # split by the canvas clip.
         def wrap_segments(segments, width)
           limit = [width.to_i, 1].max
           rows = [[]]
@@ -514,17 +517,20 @@ module Meringue
           Array(segments).each do |segment|
             text = segment.is_a?(Array) ? segment.fetch(0, "").to_s : segment.to_s
             style = segment.is_a?(Array) ? segment.fetch(1, nil) : nil
-            chars = text.chars
-            offset = 0
-            while offset < chars.length
+            until text.empty?
               if remaining.zero?
                 rows << []
                 remaining = limit
               end
-              chunk = chars.slice(offset, remaining)
-              rows.last << [chunk.join, style] unless chunk.empty?
-              offset += chunk.length
-              remaining -= chunk.length
+              take = DisplayWidth.fit_length(text, remaining, at_least_one: remaining == limit)
+              if take.zero?
+                remaining = 0
+                next
+              end
+              chunk = text[0, take]
+              rows.last << [chunk, style]
+              text = text[take..].to_s
+              remaining = [remaining - DisplayWidth.width(chunk), 0].max
             end
           end
 
@@ -803,24 +809,27 @@ module Meringue
           end
         end
 
+        # `width` is terminal cells; the break point is found by character index so
+        # a wide character is never split across rows.
         def wrap_text_line(line, width)
-          return [line] unless width && line.length > width
+          return [line] unless width && DisplayWidth.width(line) > width
 
           chunks = []
           remaining = line.dup
           until remaining.empty?
-            if remaining.length <= width
+            if DisplayWidth.width(remaining) <= width
               chunks << remaining
               break
             end
 
-            break_at = remaining.rindex(/\s/, width)
+            fit = DisplayWidth.fit_length(remaining, width, at_least_one: true)
+            break_at = remaining.rindex(/\s/, fit)
             if break_at&.positive?
               chunks << remaining[0...break_at]
               remaining = remaining[(break_at + 1)..].to_s.lstrip
             else
-              chunks << remaining[0...width]
-              remaining = remaining[width..].to_s.lstrip
+              chunks << remaining[0...fit]
+              remaining = remaining[fit..].to_s.lstrip
             end
           end
           chunks

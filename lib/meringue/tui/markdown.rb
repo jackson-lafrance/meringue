@@ -266,8 +266,13 @@ module Meringue
         end
       end
 
+      # Each styled character carries the cells it draws, so `capacity` and
+      # `take` budget by terminal column while slicing by character: a wide
+      # character that does not fit moves whole to the next row.
       def wrap_segments(segments, width:, gutter:, first_prefix:, continuation_prefix:, preserve_space: false)
-        styled_chars = segments.flat_map { |text, style| text.to_s.chars.map { |char| [char, style] } }
+        styled_chars = segments.flat_map do |text, style|
+          text.to_s.chars.zip(DisplayWidth.char_widths(text)).map { |char, cells| [char, style, cells] }
+        end
         return [[gutter, *first_prefix]] if styled_chars.empty?
 
         output = []
@@ -275,7 +280,7 @@ module Meringue
         until styled_chars.empty?
           prefix = first ? first_prefix : continuation_prefix
           capacity = available_width(width, gutter, prefix)
-          take = [capacity, styled_chars.length].min
+          take = chars_within(styled_chars, capacity)
           if !preserve_space && take < styled_chars.length
             break_index = styled_chars.first(take + 1).rindex { |char, _style| char.match?(/\s/) }
             take = break_index if break_index&.positive?
@@ -288,6 +293,20 @@ module Meringue
           first = false
         end
         output
+      end
+
+      # Leading characters that fit in `capacity` cells; a zero-width character
+      # stays with the character before it.
+      def chars_within(styled_chars, capacity)
+        used = 0
+        count = 0
+        styled_chars.each do |_char, _style, cells|
+          break if cells.positive? && used + cells > capacity
+
+          used += cells
+          count += 1
+        end
+        count
       end
 
       def segments_from_chars(chars)
@@ -308,7 +327,7 @@ module Meringue
       end
 
       def segment_width(segment)
-        segment.is_a?(Array) ? segment.fetch(0, "").to_s.length : segment.to_s.length
+        DisplayWidth.width(segment.is_a?(Array) ? segment.fetch(0, "") : segment)
       end
 
       def clipped_prefixed_line(gutter, segments, width)
@@ -316,8 +335,12 @@ module Meringue
         clipped = Array(segments).filter_map do |text, style|
           break if remaining == 0
 
-          value = remaining ? text.to_s.chars.take(remaining).join : text.to_s
-          remaining -= value.length if remaining
+          value = text.to_s
+          if remaining
+            value = DisplayWidth.truncate(value, remaining)
+            # A wide character that did not fit in the last cell ends the row too.
+            remaining = value.length < text.to_s.length ? 0 : remaining - DisplayWidth.width(value)
+          end
           [value, style] unless value.empty?
         end
         [gutter, *clipped]
