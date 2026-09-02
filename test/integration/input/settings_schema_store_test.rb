@@ -86,6 +86,21 @@ class InputSettingsSchemaStoreTest < Minitest::Test
     assert_includes error.field_errors.fetch("agent.head_harness"), "pi, claude, codex"
   end
 
+  # Shellwords.split raises ArgumentError, not a `Shellwords::ParseError` (which does not exist),
+  # so an unmatched quote must surface as the field's own validation error rather than as a
+  # NameError from a rescue clause that only resolves on the failure path.
+  def test_unmatched_quote_in_a_command_setting_is_an_argument_error_and_a_field_error
+    definition = Meringue::Config::Schema.fetch("harnesses.pi.command")
+
+    error = assert_raises(ArgumentError) { definition.normalize_value("pi --tools \"read") }
+    assert_includes error.message, "Unmatched quote"
+
+    validation = assert_raises(Meringue::Config::ValidationError) do
+      Meringue::Config::Schema.validate_changes({ "harnesses.pi.command" => "pi --tools \"read" }, config: empty_config)
+    end
+    assert_includes validation.field_errors.fetch("harnesses.pi.command"), "Unmatched quote"
+  end
+
   def test_every_supported_editor_type_normalizes_and_validates
     samples = {
       "boolean" => true,

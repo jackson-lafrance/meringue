@@ -94,6 +94,30 @@ class SupervisorTransportAdapterContractTest < HarnessIntegrationTest
     Meringue::Supervisor::ADAPTERS.delete("demo")
   end
 
+  # The handoff timeout is the one failure the supervisor is built to retry, so it has to surface
+  # as the supervisor's own transient error. Both adapters used to name the wrong constant here
+  # (one unresolvable, one the marker *module*), which turned the timeout into a NameError or
+  # TypeError that the kernel treated as a hard failure instead of deferring.
+  def test_handoff_timeout_raises_a_retryable_transient_error_on_every_polling_adapter
+    ownership = build_transport_ownership(tmpdir)
+    client = Object.new
+    def client.get_state(_ref) = { "is_streaming" => true }
+    def client.harness_name = "claude"
+    session_ref = { "is_streaming" => true, "session_id" => "s1" }
+
+    [Meringue::Supervisor::PiAdapter, Meringue::Supervisor::InteractiveAdapter].each do |adapter_class|
+      adapter = adapter_class.new(client: client, transport_ownership: ownership)
+      refute_respond_to client, :wait_for_settled, "the adapter must fall back to its own polling loop"
+
+      error = assert_raises(Meringue::Supervisor::TransientError, adapter_class.name) do
+        adapter.wait_for_settled(session_ref, timeout: 0.05)
+      end
+      assert_includes error.message, "did not settle before handoff timeout"
+      assert Meringue::Harness.transient_session_error?(error),
+             "#{adapter_class} must raise an error the kernel retries rather than fails"
+    end
+  end
+
   private
 
   def assert_adapter_satisfies_contract(adapter)
