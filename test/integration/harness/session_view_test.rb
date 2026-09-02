@@ -292,6 +292,16 @@ class HarnessSessionViewTest < HarnessIntegrationTest
     assert_empty normalized("some_future_pi_event")
   end
 
+  def test_normalize_event_shows_dialog_requests_and_drops_fire_and_forget_ui_calls
+    dialog = normalized("extension_ui_request", "id" => "1", "method" => "select", "title" => "Allow?", "options" => %w[Yes No]).first
+    assert_equal "interaction_request", dialog.fetch("kind")
+    assert_equal "select", dialog.fetch("request_type")
+
+    assert_empty normalized("extension_ui_request", "id" => "2", "method" => "setWidget", "widgetKey" => "pi.precognition", "widgetLines" => ["x"])
+    assert_empty normalized("extension_ui_request", "id" => "3", "method" => "setStatus", "statusKey" => "k", "statusText" => "v")
+    assert_empty normalized("extension_ui_request", "id" => "4", "method" => "notify", "message" => "hi")
+  end
+
   def test_normalize_event_carries_sequence_and_timestamp
     event = PiSessionView.normalize_event(
       "sequence" => 12,

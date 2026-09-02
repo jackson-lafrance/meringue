@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Fixed
 
+- Pi heads and workers no longer show as blocked, `needs input`, or `retry me` because an
+  extension drew a status widget. Pi emits every `ctx.ui.*` call as an `extension_ui_request`,
+  and Meringue read all of them as a dialog waiting for a person, so a `setWidget` from an
+  extension such as Precognition pinned every new session as `blocked`, kept it from ever
+  settling, and made heads look like failed transport. Only the dialog methods (`select`,
+  `confirm`, `input`, `editor`) count now, markers already saved for fire-and-forget calls are
+  read as answered, killed agents drop their pending marker, and the status-bar
+  `agents need input` counter skips killed and completed workers instead of only ever climbing.
 - Setup no longer has a Status bar step. Activating its **Customize layout** control set a flag
   that emptied the card: the inline drag surface behind that flag had no draft, no snapshot, and
   no key routing, so the step went blank and no composer ever appeared. Arranging the bar stays

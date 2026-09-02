@@ -475,10 +475,16 @@ module Meringue
           value.to_s.strip unless value.to_s.strip.empty?
         end
 
+        # A killed or completed worker keeps its last marker for history; only a live worker is
+        # still waiting on someone, so only live workers count here.
+        HUMAN_INPUT_TERMINAL_STATUSES = %w[completed killed].freeze
+
         def human_input_segments(state)
           count = Array(state.fetch("agents", [])).count do |agent|
-            marker = agent.is_a?(Hash) ? agent.dig("harness_metadata", "human_input_request") : nil
-            agent.is_a?(Hash) && agent.fetch("type", nil).to_s == "worker" && marker.is_a?(Hash) && marker.fetch("state", nil).to_s == "pending"
+            next false unless agent.is_a?(Hash) && agent.fetch("type", nil).to_s == "worker"
+            next false if HUMAN_INPUT_TERMINAL_STATUSES.include?(agent.fetch("status", nil).to_s)
+
+            Harness::HumanInput.pending_marker?(agent.dig("harness_metadata", "human_input_request"))
           end
           return [] unless count.positive?
 

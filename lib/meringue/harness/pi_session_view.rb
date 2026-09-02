@@ -128,11 +128,15 @@ module Meringue
             "details" => compact_event(event)
           )]
         when "extension_ui_request"
+          # Fire-and-forget UI calls (setWidget, setStatus, notify, setTitle) are cosmetic in a
+          # managed view; only a dialog that waits for an answer is worth a row.
+          return [] unless HumanInput.blocking_extension_ui_request?(event)
+
           [base.merge(
             "kind" => "interaction_request",
             "phase" => "unsupported",
             "message" => "Pi requested extension UI input that is not available in the managed worker view.",
-            "request_type" => event["requestType"] || event["type"],
+            "request_type" => event["method"] || event["requestType"] || event["type"],
             "details" => compact_event(event)
           )]
         when "extension_error", "rpc_parse_error", "process_exit"

@@ -36,8 +36,7 @@ module Meringue
       end
 
       def human_input_pending?(metadata)
-        request = metadata.fetch("human_input_request", nil)
-        request.is_a?(Hash) && request.fetch("state", nil).to_s == "pending"
+        Harness::HumanInput.pending_marker?(metadata.fetch("human_input_request", nil))
       end
 
       def recovery_record(worker)

@@ -266,6 +266,11 @@ module Meringue
         agent["status"] = "killed"
         agent["updated_at"] = now
         agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge("killed_at" => now)
+        # Nobody can answer a killed session, so its open request stops counting as pending.
+        request = agent["harness_metadata"].fetch("human_input_request", nil)
+        if request.is_a?(Hash) && request.fetch("state", nil).to_s == "pending"
+          agent["harness_metadata"]["human_input_request"] = request.merge("state" => "dismissed", "dismissed_at" => now)
+        end
         return unless agent.fetch("type", nil) == "head"
 
         # The caller stops attached harness sessions; only mark the head session terminal here
