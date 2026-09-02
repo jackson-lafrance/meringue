@@ -209,12 +209,20 @@ module HarnessSupport
     end
 
     # Pi auth checks are separate short-lived CLI calls, so answer them before
-    # entering the RPC stdin loop. Tests can set auth_statuses by provider.
+    # entering the RPC stdin loop. Tests can set auth_statuses by provider,
+    # make the check hang with auth_sleep, or replace the JSON answer with
+    # auth_raw_stdout to exercise the client's timeout and parse failure paths.
     if ARGV.include?("auth") && ARGV.include?("check")
-      provider = argv_option("--provider")
-      auth = config.fetch("auth_statuses", {}).fetch(provider, { "status" => "ready", "source" => "test" })
-      auth = { "status" => auth } unless auth.is_a?(Hash)
-      $stdout.write(JSON.generate(auth) + "\n")
+      File.write(config["auth_pid_file"], Process.pid.to_s) if config["auth_pid_file"]
+      sleep(config["auth_sleep"].to_f) if config["auth_sleep"]
+      if config.key?("auth_raw_stdout")
+        $stdout.write(config["auth_raw_stdout"].to_s)
+      else
+        provider = argv_option("--provider")
+        auth = config.fetch("auth_statuses", {}).fetch(provider, { "status" => "ready", "source" => "test" })
+        auth = { "status" => auth } unless auth.is_a?(Hash)
+        $stdout.write(JSON.generate(auth) + "\n")
+      end
       exit(config.fetch("auth_exit_code", 0))
     end
 

@@ -123,7 +123,7 @@ module Meringue
       end
 
       attr_reader :command, :env, :session_dir, :command_timeout,
-                  :event_timeout, :shutdown_timeout
+                  :event_timeout, :shutdown_timeout, :model_auth_timeout
 
       def prompt_modes
         %w[normal steer follow_up]
@@ -138,9 +138,11 @@ module Meringue
                      event_timeout: DEFAULT_EVENT_TIMEOUT,
                      shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
                      transport_ownership: nil,
-                     takeover_settle_timeout: DEFAULT_TAKEOVER_SETTLE_TIMEOUT)
+                     takeover_settle_timeout: DEFAULT_TAKEOVER_SETTLE_TIMEOUT,
+                     model_auth_timeout: DEFAULT_MODEL_AUTH_TIMEOUT)
         @transport_ownership = transport_ownership || TransportOwnership.new
         @takeover_settle_timeout = Float(takeover_settle_timeout)
+        @model_auth_timeout = Float(model_auth_timeout)
         @command = command
         @env = env.transform_keys(&:to_s).transform_values(&:to_s)
         @extra_args = extra_args.map(&:to_s)

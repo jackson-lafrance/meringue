@@ -213,15 +213,21 @@ module Meringue
         argv = Array(command).map(&:to_s) + without_options(extra_args, "--model", "--thinking") + [
           "auth", "check", "--json", "--provider", provider, "--no-refresh"
         ]
-        stdout, _stderr, status = Timeout.timeout(DEFAULT_MODEL_AUTH_TIMEOUT) do
-          Open3.capture3(process_environment(cwd), *argv, chdir: cwd)
-        end
+        stdout, status = capture_auth_check(argv, cwd: cwd)
+        return { "status" => ModelCatalog::AUTHENTICATION_UNKNOWN, "reason" => "auth_check_timed_out" } if status.nil?
+
         payload = stdout.to_s.lines.reverse.filter_map do |line|
           JSON.parse(line)
         rescue JSON::ParserError
           nil
         end.find { |value| value.is_a?(Hash) }
-        return { "status" => ModelCatalog::AUTHENTICATION_UNKNOWN, "reason" => "invalid_auth_response" } unless payload
+        unless payload
+          # A non-zero exit without any JSON is Pi refusing the check outright
+          # (unknown provider, unsupported flag); zero exit without JSON is a
+          # response Meringue cannot read.
+          reason = status.success? ? "invalid_auth_response" : "auth_check_failed"
+          return { "status" => ModelCatalog::AUTHENTICATION_UNKNOWN, "reason" => reason }
+        end
 
         {
           "status" => ModelCatalog.normalize_authentication_status(payload["status"]),
@@ -230,6 +236,50 @@ module Meringue
         }.compact
       rescue StandardError
         { "status" => ModelCatalog::AUTHENTICATION_UNKNOWN, "reason" => "auth_check_failed" }
+      end
+
+      # `Open3.capture3` cannot be bounded by `Timeout`: its block-form `ensure`
+      # joins the child in the calling thread, so a hung `pi auth check` would
+      # stall the whole catalog refresh. Drain the pipes on reader threads, wait
+      # on the process itself, and kill it when the deadline passes. Returns
+      # `[stdout, status]`, with a nil status meaning the check timed out.
+      def capture_auth_check(argv, cwd:)
+        Open3.popen3(process_environment(cwd), *argv, chdir: cwd) do |stdin, stdout, stderr, wait_thread|
+          stdin.close
+          out_reader = quiet_reader(stdout)
+          err_reader = quiet_reader(stderr)
+          begin
+            status = Timeout.timeout(model_auth_timeout) { wait_thread.value }
+          rescue Timeout::Error
+            terminate_auth_check(wait_thread)
+            status = nil
+          ensure
+            stdout.close unless stdout.closed?
+            stderr.close unless stderr.closed?
+          end
+          err_reader.join
+          [out_reader.value, status]
+        end
+      end
+
+      def quiet_reader(io)
+        Thread.new do
+          # Closing the pipe from the waiting thread raises IOError here; that
+          # is expected, and a backtrace on stderr would corrupt the TUI.
+          Thread.current.report_on_exception = false
+          buffer = +""
+          loop { buffer << io.readpartial(4096) }
+        rescue EOFError, IOError
+          buffer
+        end
+      end
+
+      def terminate_auth_check(wait_thread)
+        Process.kill("TERM", wait_thread.pid)
+        wait_thread.join(0.5) || Process.kill("KILL", wait_thread.pid)
+        wait_thread.join
+      rescue Errno::ESRCH
+        nil
       end
 
       def build_model_catalog_argv
