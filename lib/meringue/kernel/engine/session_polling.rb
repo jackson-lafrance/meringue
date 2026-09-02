@@ -202,7 +202,11 @@ module Meringue
         result = {
           "agent_id" => agent.fetch("id"),
           "agent_type" => agent.fetch("type", nil),
-          "state" => settle_poll_state(settled: settled, settle_failure: settle_failure),
+          "state" => settle_poll_state(
+            settled: settled,
+            settle_failure: settle_failure,
+            human_input_requests: human_input_requests
+          ),
           "polled_session_ref" => session_ref,
           "session_ref" => state_ref,
           "events" => events,
@@ -307,7 +311,10 @@ module Meringue
         end
       end
 
-      def settle_poll_state(settled:, settle_failure: nil)
+      def settle_poll_state(settled:, settle_failure: nil, human_input_requests: [])
+        # A stopped harness session can still wait for an extension answer or command approval.
+        # Keep it on the working refresh path so the request becomes a durable blocked marker.
+        return "working" if Array(human_input_requests).any?
         return "working" unless settled
         return "settle_failed" if settle_failure
 
