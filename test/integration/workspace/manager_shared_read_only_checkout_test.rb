@@ -129,16 +129,135 @@ class WorkspaceManagerSharedReadOnlyCheckoutTest < Minitest::Test
     end
   end
 
-  def test_feature_branch_checkout_is_not_treated_as_shared_main
+  def test_clean_feature_branch_at_a_mainline_commit_is_shared_as_a_mainline_snapshot
     with_workspace_tmpdir do |tmp|
       project = create_git_project(tmp)
       run_git!(project.fetch("project_root"), "switch", "-c", "feature", env: project.fetch("git_env"))
       manager = workspace_manager(tmp)
 
+      workspace = manager.shared_read_only_checkout(project_root: project.fetch("project_root"))
+
+      assert_equal "shared_checkout", workspace.fetch("strategy")
+      assert_equal real_path(project.fetch("project_root")), workspace.fetch("workspace_path")
+      assert_equal "feature", workspace.fetch("workspace_branch")
+      assert_equal "mainline_snapshot", workspace.fetch("shared_checkout_selection")
+      assert_equal true, workspace.fetch("read_only")
+      assert manager.validate_worker_workspace(workspace).fetch("usable")
+      refute Dir.exist?(File.join(tmp, "workspaces")), "a clean branch checkout is shared, not replaced by a new worktree"
+    end
+  end
+
+  def test_clean_feature_branch_with_its_own_commits_is_shared_as_another_branch
+    with_workspace_tmpdir do |tmp|
+      project = create_git_project(tmp)
+      run_git!(project.fetch("project_root"), "switch", "-c", "feature", env: project.fetch("git_env"))
+      advance_local_main(project)
+      manager = workspace_manager(tmp)
+
+      workspace = manager.shared_read_only_checkout(project_root: project.fetch("project_root"))
+
+      assert_equal "shared_checkout", workspace.fetch("strategy")
+      assert_equal "feature", workspace.fetch("workspace_branch")
+      assert_equal "other_branch", workspace.fetch("shared_checkout_selection")
+      assert manager.validate_worker_workspace(workspace).fetch("usable")
+    end
+  end
+
+  def test_main_checkout_is_preferred_over_a_clean_feature_branch_checkout_listed_first
+    with_workspace_tmpdir do |tmp|
+      project = create_git_project(tmp)
+      run_git!(project.fetch("project_root"), "switch", "-c", "feature", env: project.fetch("git_env"))
+      linked_main = File.join(tmp, "linked-main")
+      run_git!(project.fetch("project_root"), "worktree", "add", linked_main, "main", env: project.fetch("git_env"))
+      manager = workspace_manager(tmp)
+
+      workspace = manager.shared_read_only_checkout(project_root: project.fetch("project_root"))
+
+      assert_equal real_path(linked_main), workspace.fetch("workspace_path")
+      assert_equal "main", workspace.fetch("workspace_branch")
+      assert_equal "main_branch", workspace.fetch("shared_checkout_selection")
+    end
+  end
+
+  def test_mainline_snapshot_is_preferred_over_a_branch_with_its_own_commits_listed_first
+    with_workspace_tmpdir do |tmp|
+      project = create_git_project(tmp)
+      run_git!(project.fetch("project_root"), "switch", "-c", "feature", env: project.fetch("git_env"))
+      advance_local_main(project)
+      stale = File.join(tmp, "stale-branch")
+      run_git!(project.fetch("project_root"), "worktree", "add", "-b", "stale", stale, "origin/main", env: project.fetch("git_env"))
+      manager = workspace_manager(tmp)
+
+      workspace = manager.shared_read_only_checkout(project_root: project.fetch("project_root"))
+
+      assert_equal real_path(stale), workspace.fetch("workspace_path")
+      assert_equal "stale", workspace.fetch("workspace_branch")
+      assert_equal "mainline_snapshot", workspace.fetch("shared_checkout_selection")
+    end
+  end
+
+  def test_dirty_main_checkout_falls_back_to_a_clean_feature_branch_checkout
+    with_workspace_tmpdir do |tmp|
+      project = create_git_project(tmp)
+      File.write(File.join(project.fetch("project_root"), "README.md"), "dirty\n")
+      feature = File.join(tmp, "feature-checkout")
+      run_git!(project.fetch("project_root"), "worktree", "add", "-b", "feature", feature, "main", env: project.fetch("git_env"))
+      manager = workspace_manager(tmp)
+
+      workspace = manager.shared_read_only_checkout(project_root: project.fetch("project_root"))
+
+      assert_equal "shared_checkout", workspace.fetch("strategy")
+      assert_equal real_path(feature), workspace.fetch("workspace_path")
+      assert_equal "feature", workspace.fetch("workspace_branch")
+      assert_equal "dirty\n", File.read(File.join(project.fetch("project_root"), "README.md")), "the dirty checkout is left alone"
+    end
+  end
+
+  def test_bare_registered_root_uses_a_clean_linked_feature_checkout_instead_of_creating_a_managed_checkout
+    with_workspace_tmpdir do |tmp|
+      project = create_git_project(tmp)
+      feature = File.join(tmp, "world-feature")
+      run_git!(project.fetch("origin_path"), "worktree", "add", "-b", "feature", feature, "main", env: project.fetch("git_env"))
+      manager = workspace_manager(tmp)
+
+      workspace = manager.shared_read_only_checkout(project_root: project.fetch("origin_path"))
+
+      assert_equal "shared_checkout", workspace.fetch("strategy")
+      assert_equal real_path(feature), workspace.fetch("workspace_path")
+      assert_equal "feature", workspace.fetch("workspace_branch")
+      assert_equal false, workspace.fetch("created")
+      assert_equal false, workspace.fetch("managed_shared_checkout")
+      assert manager.validate_worker_workspace(workspace).fetch("usable")
+      refute Dir.exist?(File.join(tmp, "workspaces")), "an existing clean checkout is reused before a managed one is created"
+    end
+  end
+
+  def test_detached_checkout_is_not_shared
+    with_workspace_tmpdir do |tmp|
+      project = create_git_project(tmp)
+      run_git!(project.fetch("project_root"), "switch", "--detach", env: project.fetch("git_env"))
+      manager = workspace_manager(tmp)
+
       outcome = manager.shared_read_only_checkout(project_root: project.fetch("project_root"))
 
       assert_equal false, outcome.fetch("usable")
-      assert_equal "no_readable_main_checkout", outcome.fetch("reason")
+      assert_equal "no_readable_checkout", outcome.fetch("reason")
+    end
+  end
+
+  def test_shared_checkout_that_switched_branch_after_selection_fails_validation
+    with_workspace_tmpdir do |tmp|
+      project = create_git_project(tmp)
+      run_git!(project.fetch("project_root"), "switch", "-c", "feature", env: project.fetch("git_env"))
+      manager = workspace_manager(tmp)
+      workspace = manager.shared_read_only_checkout(project_root: project.fetch("project_root"))
+      assert_equal "feature", workspace.fetch("workspace_branch")
+
+      run_git!(project.fetch("project_root"), "switch", "main", env: project.fetch("git_env"))
+      validation = manager.validate_worker_workspace(workspace)
+
+      assert_equal false, validation.fetch("usable")
+      assert_equal "shared_checkout_branch_moved", validation.fetch("reason")
     end
   end
 end

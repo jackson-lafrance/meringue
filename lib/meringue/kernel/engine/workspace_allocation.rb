@@ -134,7 +134,7 @@ module Meringue
               note = if shared.fetch("strategy") == "project_root"
                        "Project is not a Git repository; harness tools are restricted to read-only access in the project directory."
                      else
-                       "Validated shared main checkout; harness tools are restricted to read-only access."
+                       shared_checkout_note(shared)
                      end
               return shared.merge(
                 "workspace_strategy" => shared.fetch("strategy"),
@@ -167,6 +167,24 @@ module Meringue
           "workspace_mode_fallback_reason" => fallback_reason,
           "note" => fallback_reason ? "Shared read-only checkout unavailable (#{fallback_reason}); allocated an isolated workspace." : isolated.fetch("note", nil)
         )
+      end
+
+      # A reader on `main` needs no caveat. A reader on any other branch is told which branch and
+      # whether that branch's commit is mainline code or carries its own commits, so the answer it
+      # returns can be read with the right amount of trust.
+      def shared_checkout_note(shared)
+        selection = shared.fetch("shared_checkout_selection", Meringue::Workspace::Manager::SHARED_CHECKOUT_MAIN_BRANCH)
+        branch = shared.fetch("workspace_branch", nil)
+        case selection
+        when Meringue::Workspace::Manager::SHARED_CHECKOUT_MAINLINE_SNAPSHOT
+          "No clean main checkout was available; validated shared checkout on branch #{branch}, whose commit is on main " \
+            "(possibly behind it); harness tools are restricted to read-only access."
+        when Meringue::Workspace::Manager::SHARED_CHECKOUT_OTHER_BRANCH
+          "No clean main checkout was available; validated shared checkout on branch #{branch}, which carries commits " \
+            "that are not on main; harness tools are restricted to read-only access."
+        else
+          "Validated shared main checkout; harness tools are restricted to read-only access."
+        end
       end
 
       def resolve_isolated_worker_workspace(project:, issue:, requested_workspace_path:, preview_agent_id:, task_title:, create: false,
@@ -510,6 +528,21 @@ module Meringue
         "spawn_worker"
       end
 
+      # The log line names the branch when a reader is not on main, so the user knows which code
+      # its findings describe without opening the worker record.
+      def shared_checkout_branch_caveat(agent)
+        plan = (agent.fetch("harness_metadata", {}) || {}).fetch("workspace_plan", nil)
+        return "" unless plan.is_a?(Hash)
+
+        selection = plan.fetch("shared_checkout_selection", Meringue::Workspace::Manager::SHARED_CHECKOUT_MAIN_BRANCH)
+        return "" if selection == Meringue::Workspace::Manager::SHARED_CHECKOUT_MAIN_BRANCH
+
+        branch = present_string(agent.fetch("workspace_branch", nil)) || present_string(plan.fetch("workspace_branch", nil))
+        return " (no clean main checkout was available)" unless branch
+
+        " on branch #{branch} (no clean main checkout was available)"
+      end
+
       def spawn_worker_log_message(agent, issue)
         deferred = deferred_spawn_metadata(agent)
         base = if deferred.fetch("state", nil) == DEFERRED_STATE_ACTIVATED
@@ -525,7 +558,7 @@ module Meringue
         if agent.fetch("workspace_mode", WORKSPACE_MODE_ISOLATED) == WORKSPACE_MODE_SHARED_READ_ONLY
           fallback = present_string(agent.fetch("workspace_mode_fallback_reason", nil))
           base = if agent.fetch("effective_workspace_mode", WORKSPACE_MODE_ISOLATED) == WORKSPACE_MODE_SHARED_READ_ONLY
-                   "#{base} Using a validated shared read-only checkout."
+                   "#{base} Using a validated shared read-only checkout#{shared_checkout_branch_caveat(agent)}."
                  else
                    "#{base} Shared read-only checkout unavailable#{fallback ? " (#{fallback})" : ""}; using an isolated workspace."
                  end

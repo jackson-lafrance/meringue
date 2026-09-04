@@ -63,6 +63,19 @@ module Meringue
       OWNERSHIP_DIRECTORY = ".ownership"
       SHARED_READ_ONLY_DIRECTORY = ".shared-read-only"
       SHARED_READ_ONLY_OWNER_KIND = "managed_shared_read_only_checkout"
+      # Which kind of checkout a shared read-only worker was given, best first. A reader wants
+      # mainline code, so a clean `main`/`master` checkout wins; failing that, a clean checkout
+      # whose commit is already on mainline (a stale or CI-trigger branch) is still mainline
+      # code, only older; a clean feature branch is the last resort and is labelled as such so
+      # the worker record says what the reader actually read.
+      SHARED_CHECKOUT_MAIN_BRANCH = "main_branch"
+      SHARED_CHECKOUT_MAINLINE_SNAPSHOT = "mainline_snapshot"
+      SHARED_CHECKOUT_OTHER_BRANCH = "other_branch"
+      SHARED_CHECKOUT_SELECTION_ORDER = [
+        SHARED_CHECKOUT_MAIN_BRANCH,
+        SHARED_CHECKOUT_MAINLINE_SNAPSHOT,
+        SHARED_CHECKOUT_OTHER_BRANCH
+      ].freeze
       COLLISION_ERROR_PATTERN = /already exists|already used by worktree|is already checked out/i
       # How a failed allocation can be recovered. The manager knows git, so it classifies; the
       # kernel owns what to do with a worker in each case.
@@ -344,10 +357,13 @@ module Meringue
         attach_profile_metadata(plan, profile)
       end
 
-      # Resolve a clean main/master checkout that investigation-only workers may
-      # share. A bare registered repository with no linked checkout gets a
-      # manager-owned cache under +root_path+, retained across pruning so readers
-      # pay the checkout cost only once. A directory that is not a Git repository
+      # Resolve a clean checkout that investigation-only workers may share. A clean
+      # `main`/`master` checkout is preferred; when the user has every checkout on a
+      # branch, a clean checkout on another branch is still a readable snapshot of the
+      # repository, ranked by SHARED_CHECKOUT_SELECTION_ORDER and labelled on the record.
+      # A bare registered repository with no linked checkout gets a manager-owned
+      # main/master cache under +root_path+, retained across pruning so readers pay
+      # the checkout cost only once. A directory that is not a Git repository
       # at all is still a usable read-only workspace: the project root itself, with
       # the harness enforcing read-only tools; such workers investigate and answer.
       def shared_read_only_checkout(project_root:)
@@ -592,9 +608,9 @@ module Meringue
           return reuse_outcome(false, "workspace_is_bare_repository") if record.key?("bare")
           return reuse_outcome(false, "worktree_locked") if record.key?("locked")
           return reuse_outcome(false, "worktree_prunable") if record.key?("prunable")
-          unless record.fetch("branch", nil) == "refs/heads/#{expected_branch}" && %w[main master].include?(expected_branch)
-            return reuse_outcome(false, "shared_checkout_not_on_main_branch")
-          end
+          # The checkout was selected on a specific branch. A checkout that has since moved to
+          # another branch is not the snapshot the worker record describes.
+          return reuse_outcome(false, "shared_checkout_branch_moved") unless record.fetch("branch", nil) == "refs/heads/#{expected_branch}"
           clean = shared_checkout_clean?(expected_root)
           return clean unless clean.fetch("usable", false)
           if workspace.fetch("managed_shared_checkout", false)
