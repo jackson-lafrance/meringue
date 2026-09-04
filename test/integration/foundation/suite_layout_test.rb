@@ -6,6 +6,35 @@ require "support/foundation_support"
 # Guards the plumbing the whole suite depends on: the Rakefile test task, the
 # test-file discovery glob, the shared conventions, and source dependencies.
 class FoundationSuiteLayoutTest < Minitest::Test
+  # Loads the Rakefile in a subprocess and prints what the `test` task was built from.
+  # Rake::TestTask keeps no reference from the task back to itself, so the instances
+  # are captured as they are defined instead.
+  RAKEFILE_INSPECTION = <<~RUBY
+    require "json"
+    require "rake/testtask"
+    TEST_TASKS = {}
+    Rake::TestTask.prepend(Module.new do
+      def define
+        TEST_TASKS[name.to_s] = self
+        super
+      end
+    end)
+    load "Rakefile"
+    test_task = TEST_TASKS.fetch("test")
+    puts JSON.generate(
+      "default_prerequisites" => Rake::Task["default"].prerequisites,
+      "libs" => test_task.libs,
+      "all_test_files" => ALL_TEST_FILES,
+      "selected_test_files" => test_task.file_list.to_a
+    )
+  RUBY
+
+  def all_test_files
+    Dir[FoundationSupport.repo_path("test", "**", "*_test.rb")].map do |path|
+      path.delete_prefix("#{FoundationSupport::REPO_ROOT}/")
+    end.sort
+  end
+
   def test_rakefile_defines_a_default_test_task
     status, stdout, = FoundationSupport.run_ruby(
       "-e",
@@ -13,16 +42,38 @@ class FoundationSuiteLayoutTest < Minitest::Test
     )
 
     assert_equal 0, status
-    assert_equal ["default", "test"], stdout.strip.split(",")
+    # test:smoke is the deliberate quick subset behind `bundle exec rake test:smoke`.
+    assert_equal ["default", "test", "test:smoke"], stdout.strip.split(",")
   end
 
+  # Checks the wiring by loading the Rakefile rather than grepping its spelling, so
+  # the task helper and sharding can be refactored without breaking this guard.
   def test_rakefile_wires_lib_and_test_onto_the_load_path
-    rakefile = File.read(FoundationSupport.repo_path("Rakefile"))
+    status, stdout, stderr = FoundationSupport.run_ruby("-e", RAKEFILE_INSPECTION)
 
-    assert_includes rakefile, "Rake::TestTask.new(:test)"
-    assert_includes rakefile, 't.libs = ["lib", "test"]'
-    assert_includes rakefile, 't.test_files = FileList["test/**/*_test.rb"]'
-    assert_includes rakefile, "task default: :test"
+    assert_equal 0, status, stderr
+    inspection = JSON.parse(stdout)
+
+    assert_equal ["test"], inspection.fetch("default_prerequisites")
+    assert_equal ["lib", "test"], inspection.fetch("libs")
+    assert_equal all_test_files, inspection.fetch("all_test_files")
+    assert_equal all_test_files, inspection.fetch("selected_test_files")
+  end
+
+  # CI runs the suite in shards: TEST_SHARD=n selects every n-th file (1-based) of the
+  # sorted list, so together the shards cover every file exactly once.
+  def test_rakefile_shards_select_a_deterministic_slice_of_the_sorted_test_files
+    status, stdout, stderr = FoundationSupport.run_ruby(
+      "-e", RAKEFILE_INSPECTION, env: { "TEST_SHARDS" => "8", "TEST_SHARD" => "3" }
+    )
+
+    assert_equal 0, status, stderr
+    inspection = JSON.parse(stdout)
+
+    expected = all_test_files.each_with_index.select { |_, index| index % 8 == 2 }.map(&:first)
+    refute_empty expected
+    assert_equal all_test_files, inspection.fetch("all_test_files")
+    assert_equal expected, inspection.fetch("selected_test_files")
   end
 
   def test_test_helper_exposes_the_library_and_minitest

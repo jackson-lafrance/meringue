@@ -53,8 +53,9 @@ class HarnessPiClientProtocolTest < HarnessIntegrationTest
     )
     assert_equal "read,grep,find,ls", resumed_argv[resumed_argv.index("--tools") + 1]
 
-    assert client.managed_session_view_supported?
-    refute client.interactive_session_supported?
+    # A focused Pi session opens the native interactive Pi UI, not a managed read-only view.
+    refute client.managed_session_view_supported?
+    assert client.interactive_session_supported?
   end
 
   def test_spawn_session_overrides_default_model_and_thinking_arguments_for_one_session

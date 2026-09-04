@@ -29,10 +29,11 @@ module FoundationSupport
 
   # Run a ruby subprocess from the repository root.
   # Used only for entrypoint checks that cannot be done in-process.
+  # `env` adds variables on top of the cleaned environment.
   # Returns [status, stdout_string, stderr_string].
-  def run_ruby(*args)
+  def run_ruby(*args, env: {})
     stdout, stderr, status = Open3.capture3(
-      Meringue::SubprocessEnvironment.clean, RbConfig.ruby, *args, chdir: REPO_ROOT
+      Meringue::SubprocessEnvironment.clean.merge(env), RbConfig.ruby, *args, chdir: REPO_ROOT
     )
     [status.exitstatus, stdout, stderr]
   end
