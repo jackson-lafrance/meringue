@@ -33,7 +33,7 @@ module Meringue
       end
 
       def width(segments)
-        Array(segments).sum { |text, _style| text.to_s.length }
+        Array(segments).sum { |text, _style| DisplayWidth.width(text) }
       end
     end
   end

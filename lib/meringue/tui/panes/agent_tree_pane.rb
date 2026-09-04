@@ -503,9 +503,10 @@ module Meringue
 
         def wrapped_lines(leader_segments, content, title_style:, continuation_style:, width:, selected: false,
                           continuation_segments: nil, suffix_parts: [])
-          leader_text = plain_text(leader_segments)
-          continuation_segments ||= [[" " * leader_text.length, selected ? Style::AGENT_TREE_SELECTED_DIM : Style::DIM]]
-          content_width = wrapped_content_width(width, leader_text.length)
+          # The leader holds glyphs (status dot, lock marker) so its columns are cells, not characters.
+          leader_width = DisplayWidth.width(plain_text(leader_segments))
+          continuation_segments ||= [[" " * leader_width, selected ? Style::AGENT_TREE_SELECTED_DIM : Style::DIM]]
+          content_width = wrapped_content_width(width, leader_width)
           chips = suffix_chips(suffix_parts)
           layout = wrap_content(content, content_width, chips_text(chips))
 
@@ -517,10 +518,10 @@ module Meringue
           end
         end
 
-        def wrapped_content_width(width, leader_length)
+        def wrapped_content_width(width, leader_width)
           return nil unless width
 
-          [width.to_i - leader_length, 1].max
+          [width.to_i - leader_width, 1].max
         end
 
         # Suffix chips are located by their position in the wrapped content, not by matching
@@ -583,7 +584,7 @@ module Meringue
           [
             ["  ", Style::DIM],
             ["#{continuation_prefix(prefix)} ", Style::DIM],
-            [" " * status_dot(record).length, Style::DIM],
+            [" " * DisplayWidth.width(status_dot(record)), Style::DIM],
             [" " * (id.to_s.length + 1), Style::DIM],
             ["  ", Style::DIM]
           ]
@@ -593,7 +594,7 @@ module Meringue
           [
             [" ", Style::AGENT_TREE_SELECTED_DIM],
             [" #{continuation_prefix(prefix)} ", Style::AGENT_TREE_SELECTED_DIM],
-            [" " * status_dot(record).length, Style::AGENT_TREE_SELECTED_DIM],
+            [" " * DisplayWidth.width(status_dot(record)), Style::AGENT_TREE_SELECTED_DIM],
             [" " * (id.to_s.length + 1), Style::AGENT_TREE_SELECTED_DIM],
             ["  ", Style::AGENT_TREE_SELECTED_DIM]
           ]
@@ -674,21 +675,24 @@ module Meringue
         end
 
         # Returns Chunks rather than bare strings: the offset of each wrapped row into `text`
-        # is what keeps suffix chip styling correct across a wrap.
+        # is what keeps suffix chip styling correct across a wrap. `width` is terminal cells
+        # while offsets stay character offsets, so the row budget is converted to a
+        # character count before the break point is searched.
         def split_wrapped_lines(text, width)
           cursor = 0
           lines = []
 
           while cursor < text.length
             remaining = text[cursor..].to_s
-            if remaining.length <= width
+            if DisplayWidth.width(remaining) <= width
               lines << Chunk.new(remaining, cursor)
               break
             end
 
-            slice = remaining[0, width + 1]
-            break_at = slice.rindex(" ") || width
-            break_at = width if break_at <= 0
+            fit = DisplayWidth.fit_length(remaining, width, at_least_one: true)
+            slice = remaining[0, fit + 1]
+            break_at = slice.rindex(" ") || fit
+            break_at = fit if break_at <= 0
             lines << Chunk.new(remaining[0, break_at].rstrip, cursor)
             tail = remaining[break_at..].to_s
             # Wrapping drops the whitespace it broke on, so the next row's offset has to skip it.
@@ -702,7 +706,7 @@ module Meringue
           return ELLIPSIS if width <= 1
 
           base = text.to_s.rstrip
-          return "#{base[0, width - 1].rstrip}#{ELLIPSIS}" if base.length >= width
+          return "#{DisplayWidth.truncate(base, width - 1).rstrip}#{ELLIPSIS}" if DisplayWidth.width(base) >= width
 
           "#{base}#{ELLIPSIS}"
         end
@@ -710,7 +714,7 @@ module Meringue
         def pad_selected_line(segments, width)
           return segments unless width
 
-          remaining = width.to_i - plain_text(segments).length
+          remaining = width.to_i - DisplayWidth.width(plain_text(segments))
           remaining.positive? ? segments + [[" " * remaining, Style::AGENT_TREE_SELECTED_DIM]] : segments
         end
 

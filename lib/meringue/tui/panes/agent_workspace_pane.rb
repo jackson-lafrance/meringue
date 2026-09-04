@@ -578,8 +578,8 @@ module Meringue
         def wrap_text(text, width)
           available = width ? [width.to_i, 1].max : nil
           text.to_s.split("\n", -1).flat_map do |line|
-            if available && line.length > available
-              line.chars.each_slice(available).map(&:join)
+            if available && DisplayWidth.width(line) > available
+              DisplayWidth.slices(line, available)
             else
               [line]
             end
