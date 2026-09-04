@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Meringue is a simple, extensible terminal orchestrator for running many coding agents at once.">
+  <title>Meringue, many agents in one place</title>
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="site.js"></script>
+</head>
+<body>
+  <header class="site-header">
+    <a class="wordmark" href="#top" aria-label="Meringue home"><span class="mark">M</span> meringue</a>
+    <nav aria-label="Main navigation">
+      <a href="docs.html">Docs</a>
+      <a href="https://github.com/jackson-lafrance/meringue">GitHub</a>
+      <button class="button button-small" type="button" data-copy="install">Download</button>
+    </nav>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <p class="eyebrow">Open source · bring your own agent</p>
+      <h1>Less terminal juggling.<br><em>More useful work.</em></h1>
+      <p class="lede">Meringue is a terminal orchestrator for running many coding agents at once. Keep the work in one place, and step in only when you need to.</p>
+      <div class="hero-actions">
+        <button class="button" type="button" data-copy="install">Download Meringue <span>↓</span></button>
+        <a class="text-link" href="https://github.com/jackson-lafrance/meringue">View on GitHub <span>↗</span></a>
+      </div>
+      <p class="requirements">Ruby 3.1 or newer · Git · a signed in coding agent CLI</p>
+    </section>
+
+    <section class="workflow" id="workflow" aria-labelledby="workflow-title">
+      <div class="workflow-heading">
+        <div><p class="eyebrow">Your first Meringue run</p><h2 id="workflow-title">One prompt.<br>Clear progress.</h2></div>
+        <p>These four views follow the real dashboard flow. The head routes your request, a worker does the work, and the AgentTree keeps the result in view.</p>
+      </div>
+      <div class="terminal-demo" aria-roledescription="carousel" aria-label="Meringue workflow demonstration">
+        <div class="terminal-bar"><span></span><span></span><span></span><b>meringue</b></div>
+        <div class="terminal-screen">
+          <div class="terminal-tree">
+            <div class="pane-title">AGENT TREE</div>
+            <div class="tree-stage" data-stage="0"><p class="tree-row project">● P1  Meringue</p><p class="tree-row dim">  No work yet</p></div>
+            <div class="tree-stage" data-stage="1" hidden><p class="tree-row head">● H1  Route the request</p><p class="tree-row project">● P1  Meringue</p><p class="tree-row issue">  └  I1  Add search</p></div>
+            <div class="tree-stage" data-stage="2" hidden><p class="tree-row head">● H1  Route the request</p><p class="tree-row project">● P1  Meringue</p><p class="tree-row issue">  └  I1  Add search</p><p class="tree-row worker">     ● W1  Build search</p></div>
+            <div class="tree-stage" data-stage="3" hidden><p class="tree-row head">✓ H1  Route the request</p><p class="tree-row project">● P1  Meringue</p><p class="tree-row issue">  └  I1  Add search</p><p class="tree-row success">     ✓ W1  Build search</p></div>
+          </div>
+          <div class="terminal-logs">
+            <div class="pane-title">LOGS</div>
+            <div class="log-stage" data-stage="0"><p><i>[09:41]</i> <b class="user">● you</b>  Add search to the issue list</p><div class="composer"><span>›</span> Add search to the issue list<span class="cursor"></span></div></div>
+            <div class="log-stage" data-stage="1" hidden><p><i>[09:41]</i> <b class="user">● you</b>  Add search to the issue list</p><p><i>[09:41]</i> <b class="head-text">● H1</b>  Reading the project context</p><p class="log-note">▌ Created issue I1: Add search</p></div>
+            <div class="log-stage" data-stage="2" hidden><p><i>[09:41]</i> <b class="head-text">● H1</b>  Assigned issue I1 to worker W1</p><p class="log-note">▌ Worktree ready for W1</p><p><i>[09:42]</i> <b class="worker">● W1</b>  Working in its own workspace</p></div>
+            <div class="log-stage" data-stage="3" hidden><p><i>[09:44]</i> <b class="worker">✓ W1</b>  Completed Add search</p><p class="log-note">▌ Tests passed and the result is ready to review</p><p class="success">✓ Issue I1 is complete</p></div>
+          </div>
+        </div>
+        <div class="workflow-controls"><button class="carousel-button" type="button" data-carousel="previous" aria-label="Previous workflow stage">←</button><div class="stage-tabs" role="tablist" aria-label="Workflow stages"><button role="tab" aria-selected="true" aria-controls="stage-description" data-stage-button="0">Prompt</button><button role="tab" aria-selected="false" aria-controls="stage-description" data-stage-button="1">Head</button><button role="tab" aria-selected="false" aria-controls="stage-description" data-stage-button="2">Worker</button><button role="tab" aria-selected="false" aria-controls="stage-description" data-stage-button="3">Complete</button></div><button class="carousel-button" type="button" data-carousel="next" aria-label="Next workflow stage">→</button></div>
+        <div id="stage-description" class="stage-description" tabindex="-1"><strong>Send a prompt</strong><span>Type a goal in the dashboard chat. You stay in the same terminal while Meringue takes it from here.</span></div>
+      </div>
+    </section>
+
+    <section class="intro section-grid"><div><p class="eyebrow">The idea</p><h2>One place for<br>parallel work.</h2></div><div><p>Meringue puts a chat, an AgentTree, and structured logs over the coding agents you already use. Projects, issues, workers, and questions stay visible while work happens in its own space.</p><p>It coordinates the work around your agent, not instead of it.</p></div></section>
+    <section class="harness section-grid"><div><p class="eyebrow">Bring your own coding agent</p><h2>Keep the agent<br>you already trust.</h2></div><div><p>Meringue is harness agnostic by design. Use <strong>Pi</strong>, <strong>Claude Code</strong>, or <strong>Codex CLI</strong>. Meringue handles orchestration, state, logs, and navigation while your chosen agent does the coding.</p><p>New backends can fit behind the same small integration layer. Your workflow does not have to wait for one vendor.</p><a class="text-link" href="https://github.com/jackson-lafrance/meringue">Explore the project <span>↗</span></a></div></section>
+    <section class="install" id="install"><div><p class="eyebrow">Get started</p><h2>One command<br>to begin.</h2><p>Install from a terminal, then run <code>meringue</code> inside a repository. Bring a signed in Pi, Claude Code, or Codex CLI.</p></div><div class="command-card"><div class="command-label">INSTALL AND RUN <button class="copy-button" type="button" data-copy="snippet" aria-label="Copy install and run command">Copy</button></div><pre><code id="install-snippet">curl -fsSL https://raw.githubusercontent.com/jackson-lafrance/meringue/main/install.sh | sh
+meringue</code></pre></div></section>
+    <section class="contribute" id="contribute"><p class="eyebrow">Make it better</p><h2>Bring a fix, a question,<br>or a new harness.</h2><p>Meringue is early and open to thoughtful contributions. Read the project, run it locally, and make the layer more useful.</p><a class="button" href="https://github.com/jackson-lafrance/meringue">Contribute on GitHub <span>↗</span></a></section>
+  </main>
+  <div class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+  <footer><a class="wordmark" href="#top"><span class="mark">M</span> meringue</a><span>Open source, built for focused work.</span><a href="docs.html">Docs</a><a href="https://github.com/jackson-lafrance/meringue">GitHub ↗</a></footer>
+</body>
+</html>
