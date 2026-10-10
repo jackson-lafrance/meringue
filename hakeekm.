@@ -1,0 +1,145 @@
+Hakeem authored 69 visible training-path PRs across 47 repositories: 23 merged, 44 open, and two closed without merge.
+
+ I checked 82 repositories under DevDegree. The full report lists every repository and PR, with links, descriptions, status, and line counts.
+
+ Open the full report (file:///Users/jacksonlafranceshopify/hakeem-training-path-report/report.md)
+ PR spreadsheet (file:///Users/jacksonlafranceshopify/hakeem-training-path-report/pull-requests.csv) · Repository spreadsheet
+ (file:///Users/jacksonlafranceshopify/hakeem-training-path-report/repositories.csv)
+
+ Overall numbers
+
+ The visible PRs span September 4, 2025–March 13, 2026.
+
+ ┌──────────────────────────────┬──────────────┬────────┬──────┬──────────────────┬────────────────────────┐
+ │ Training stage               │ PRs authored │ Merged │ Open │ Closed, unmerged │ Adjusted lines changed │
+ ├──────────────────────────────┼──────────────┼────────┼──────┼──────────────────┼────────────────────────┤
+ │ DEV: TypeScript fundamentals │ 15           │ 8      │ 6    │ 1                │ 1,716                  │
+ ├──────────────────────────────┼──────────────┼────────┼──────┼──────────────────┼────────────────────────┤
+ │ FED: React, mobile, GraphQL  │ 30           │ 9      │ 20   │ 1                │ 13,787                 │
+ ├──────────────────────────────┼──────────────┼────────┼──────┼──────────────────┼────────────────────────┤
+ │ BED: Ruby, Rails, SQL        │ 24           │ 6      │ 18   │ 0                │ 3,688                  │
+ ├──────────────────────────────┼──────────────┼────────┼──────┼──────────────────┼────────────────────────┤
+ │ Total                        │ 69           │ 23     │ 44   │ 2                │ 19,191                 │
+ └──────────────────────────────┴──────────────┴────────┴──────┴──────────────────┴────────────────────────┘
+
+ Adjusted total: 17,366 additions and 1,825 deletions. Merged PRs alone account for 5,135 changed lines.
+
+ “Adjusted” excludes downloaded dependencies, lockfiles, build output, and exact duplicate PR diffs. It still includes tests, documentation, configuration, and data—not just application code.
+
+ Important projects
+
+ ### 1. Shopiflix — the frontend team capstone
+
+ Team: Hakeem, Ebaad, and Ann.
+ Hakeem’s contribution: eight PRs; seven merged, one open.
+ Adjusted changes: +3,490 / −526.
+
+ His main contributions covered:
+
+ - Login/signup screens and password validation: #18 (https://github.com/DevDegree/fed-Shopiflix-EbaaadAhmed-Annmayli-hakeem-k34/pull/18), #20
+   (https://github.com/DevDegree/fed-Shopiflix-EbaaadAhmed-Annmayli-hakeem-k34/pull/20).
+ - Child/adult profiles: birthday entry, age calculation, separate content, and profile-aware GraphQL queries: #40 (https://github.com/DevDegree/fed-Shopiflix-EbaaadAhmed-Annmayli-hakeem-k34/pull/40).
+ - Registration changes: extended the existing mutation with birthday/profile information and updated the client: #42
+   (https://github.com/DevDegree/fed-Shopiflix-EbaaadAhmed-Annmayli-hakeem-k34/pull/42).
+ - Recommendation popup: a hook and modal that suggest a random movie or series: #33 (https://github.com/DevDegree/fed-Shopiflix-EbaaadAhmed-Annmayli-hakeem-k34/pull/33).
+ - Content and visual work: course-themed series data, login fixes, and an open styling PR: #30 (https://github.com/DevDegree/fed-Shopiflix-EbaaadAhmed-Annmayli-hakeem-k34/pull/30), #34
+   (https://github.com/DevDegree/fed-Shopiflix-EbaaadAhmed-Annmayli-hakeem-k34/pull/34), #28 (https://github.com/DevDegree/fed-Shopiflix-EbaaadAhmed-Annmayli-hakeem-k34/pull/28).
+
+ This project shows work across UI, React state, GraphQL, and server logic. The team had 19 PRs overall; I counted only his eight.
+
+ ### 2. Stopwatch — web app, custom hooks, and mobile conversion
+
+ The original stopwatch (https://github.com/DevDegree/fed-stopwatch-hakeem-k34/pull/1) merged. It includes elapsed time, pause/resume, laps, and a five-second challenge.
+
+ An open follow-up (https://github.com/DevDegree/fed-stopwatch-hakeem-k34/pull/2) extracts reusable hooks and time utilities.
+
+ ┌─────────────────────────────────────────────────────────────────────────────────────────┬──────────────────────┬──────────────────┐
+ │ Submission                                                                              │ Status               │ Adjusted changes │
+ ├─────────────────────────────────────────────────────────────────────────────────────────┼──────────────────────┼──────────────────┤
+ │ Original web app and follow-up                                                          │ One merged, one open │ +942 / −104      │
+ ├─────────────────────────────────────────────────────────────────────────────────────────┼──────────────────────┼──────────────────┤
+ │ React Native/Expo conversion (https://github.com/DevDegree/fed-CYOMA-hakeem-k34/pull/1) │ Open                 │ +691 / −44       │
+ ├─────────────────────────────────────────────────────────────────────────────────────────┼──────────────────────┼──────────────────┤
+ │ Second web submission (https://github.com/DevDegree/fed-stopwatch-hakeem-k34-2/pull/1)  │ Open                 │ +256 / −2        │
+ └─────────────────────────────────────────────────────────────────────────────────────────┴──────────────────────┴──────────────────┘
+
+ The mobile version adds native controls, haptic feedback, a lap list, and a challenge modal. These are related iterations, not three unrelated products.
+
+ ### 3. Hacker News tutorial and IMDB-like app
+
+ Hacker News (https://github.com/DevDegree/hacker-news-tutorial-hakeem-34/pull/1): +1,565 / −1; open.
+
+ The tutorial submission covers React/Apollo, a Prisma/GraphQL backend, login, link creation, voting, search, subscriptions, and pagination.
+
+ IMDB-like mobile app (https://github.com/DevDegree/fed-imdb-hakeem-k34/pull/1): +589 / −12; open.
+
+ It uses React Native, Apollo, and Expo routes to show movies, movie details, cast, and reviews.
+
+ The Hacker News project follows a tutorial. Its size does not establish independent backend design.
+
+ ### 4. Ruby Wordle — team project with Soonwoo
+
+ Three authored PRs: two merged, one open. Adjusted changes: +485 / −35.
+
+ ┌───────────────────────────────────────────────────────────────────────┬────────────────────────────────────────────────────────┬────────┐
+ │ PR                                                                    │ Contribution                                           │ Status │
+ ├───────────────────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────┼────────┤
+ │ #8 (https://github.com/DevDegree/ruby-wordle-soonwoo-hakeem/pull/8)   │ Welcome menu, instructions, and menu-input validation  │ Merged │
+ ├───────────────────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────┼────────┤
+ │ #10 (https://github.com/DevDegree/ruby-wordle-soonwoo-hakeem/pull/10) │ Board, guess-input validation, and game-loop structure │ Merged │
+ ├───────────────────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────┼────────┤
+ │ #20 (https://github.com/DevDegree/ruby-wordle-soonwoo-hakeem/pull/20) │ Difficulty levels, variable word lengths, and timers   │ Open   │
+ └───────────────────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────┴────────┘
+
+ I count the timer/difficulty work as a proposed extension, not completed merged functionality.
+
+ ### 5. Weather CLI — capstone with you and Dasha
+
+ The team app supports weather lookup, forecasts, city comparison, settings, and saved data.
+
+ Hakeem authored two of the team’s 21 PRs:
+
+ ┌─────────────────────────────────────────────────────────────────────────────┬───────────────────────────────────────────────────────┬──────────────────┬───────────┐
+ │ PR                                                                          │ Contribution                                          │ Status           │ Changes   │
+ ├─────────────────────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┼──────────────────┼───────────┤
+ │ #14 (https://github.com/DevDegree/jackson-dasha-hakeem-weather-app/pull/14) │ City constructor/setter validation and output changes │ Merged           │ +89 / −44 │
+ ├─────────────────────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┼──────────────────┼───────────┤
+ │ #4 (https://github.com/DevDegree/jackson-dasha-hakeem-weather-app/pull/4)   │ Earlier City-class implementation                     │ Closed, unmerged │ +91 / −0  │
+ └─────────────────────────────────────────────────────────────────────────────┴───────────────────────────────────────────────────────┴──────────────────┴───────────┘
+
+ His merged changes validate names, temperatures, humidity, wind speed, UV, and precipitation.
+
+ Other coursework
+
+ The full report gives individual links and counts for these projects.
+
+ ┌──────────────────────────────┬─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+ │ Area                         │ Work found                                                                                                                                                  │
+ ├──────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+ │ TypeScript foundations       │ Cassette player, ASCII art, penny-jar simulation, Cashmoney, object-oriented exercises, Textogram, and PR workshops                                         │
+ ├──────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+ │ React interfaces             │ Portfolio, Dan’s Hats, chessboard, DC Heroes timeline, and Taylorgram                                                                                       │
+ ├──────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+ │ React state and interactions │ Hooks exercises, grocery/coupon calculator, trivia game, and CSS animations                                                                                 │
+ ├──────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+ │ Mobile/API exercises         │ Wikipedia search, Expo StickerSmash, and team Cerebro work                                                                                                  │
+ ├──────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+ │ Ruby/Rails/SQL               │ Treasure Tracker, Bubble Tea Shop, Hangman, movie theatre, SQL CRUD, models/migrations, validations, associations, baseball statistics, and Pokémon queries │
+ └──────────────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+ The timeline work deserves particular attention: it progresses from a merged static feed to open submissions with likes, new posts, and shared React state.
+
+ Why the raw line count is misleading
+
+ GitHub reports 3,160,159 raw changed lines across his 69 PRs. Most are dependencies, not coursework code.
+
+ For example, the ActiveRecord practice PR adds 2,951,551 lines because it includes vendored Ruby gems. After exclusions, its diff is +183 / −43.
+
+ Three React Hooks PRs also share the exact same base and head commits. They count as three PRs, but their shared diff counts once.
+
+ The adjusted 19,191 figure measures cumulative PR changes—not unique code, manually typed code, or productivity. Related submissions can still contain overlapping work.
+
+ Coverage limits
+
+ 82 repositories does not mean 82 completed projects. The inventory contains starter copies, duplicate submissions, team exercises, and empty repositories.
+
