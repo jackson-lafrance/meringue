@@ -1,145 +1,208 @@
-Hakeem authored 69 visible training-path PRs across 47 repositories: 23 merged, 44 open, and two closed without merge.
+**The strongest supported claims are Polaris modernization, Playwright coverage and reliability, and full-stack contributions to Shopiflix.**
 
- I checked 82 repositories under DevDegree. The full report lists every repository and PR, with links, descriptions, status, and line counts.
+Your employment dates remain user-supplied. The records show training projects from September 2025 through March 2026, and production contributions from May through September 2026. They do not support “completed the training path before August 2025.”
 
- Open the full report (file:///Users/jacksonlafranceshopify/hakeem-training-path-report/report.md)
- PR spreadsheet (file:///Users/jacksonlafranceshopify/hakeem-training-path-report/pull-requests.csv) · Repository spreadsheet
- (file:///Users/jacksonlafranceshopify/hakeem-training-path-report/repositories.csv)
+## Resume bullets
 
- Overall numbers
+### Shopify
+- Migrated 14 deprecated Polaris text instances across 11 React components, preserving typography, accessible headings, numeric alignment, and responsive layouts.
+- Extended Playwright coverage for metafield definitions, blog-post and customer values, and metaobject entries, with GraphQL setup and failure-safe cleanup.
+- Restored CI coverage for metaobject entry creation, editing, and deletion by updating tests for Quick Edit and removing an existing CI skip.
+- Hardened test infrastructure through scoped cleanup, precise UI selectors, and a fallback for stale pull-request metadata in production validation.
+- Modernized metafield and metaobject tables with shared components, and fixed long-name truncation while preserving navigation and focus behavior.
 
- The visible PRs span September 4, 2025–March 13, 2026.
+### Shopiflix
+- Built registration and age-based profile features across a React Native client and Node.js GraphQL backend for a three-person media-catalog capstone.
+- Implemented password validation, confirmation fields, birthday selection, and persistent registration through typed GraphQL operations and custom React hooks.
+- Created a recommendation popup with timed suggestions and navigation to title details; contributed seven merged pull requests.
 
- ┌──────────────────────────────┬──────────────┬────────┬──────┬──────────────────┬────────────────────────┐
- │ Training stage               │ PRs authored │ Merged │ Open │ Closed, unmerged │ Adjusted lines changed │
- ├──────────────────────────────┼──────────────┼────────┼──────┼──────────────────┼────────────────────────┤
- │ DEV: TypeScript fundamentals │ 15           │ 8      │ 6    │ 1                │ 1,716                  │
- ├──────────────────────────────┼──────────────┼────────┼──────┼──────────────────┼────────────────────────┤
- │ FED: React, mobile, GraphQL  │ 30           │ 9      │ 20   │ 1                │ 13,787                 │
- ├──────────────────────────────┼──────────────┼────────┼──────┼──────────────────┼────────────────────────┤
- │ BED: Ruby, Rails, SQL        │ 24           │ 6      │ 18   │ 0                │ 3,688                  │
- ├──────────────────────────────┼──────────────┼────────┼──────┼──────────────────┼────────────────────────┤
- │ Total                        │ 69           │ 23     │ 44   │ 2                │ 19,191                 │
- └──────────────────────────────┴──────────────┴────────┴──────┴──────────────────┴────────────────────────┘
+These bullets avoid unsupported merchant counts, performance gains, deployment claims, and sole ownership.
 
- Adjusted total: 17,366 additions and 1,825 deletions. Merged PRs alone account for 5,135 changed lines.
+## Part A — Shopify production work
 
- “Adjusted” excludes downloaded dependencies, lockfiles, build output, and exact duplicate PR diffs. It still includes tests, documentation, configuration, and data—not just application code.
+### 1–3. Team scope, scale, and product context
 
- Important projects
+**Supported surfaces:** Settings → Custom data; metafield definition forms and tables; metaobject definition lists; app-controlled definitions; metaobject entries; shared metafield editors within resource pages.
 
- ### 1. Shopiflix — the frontend team capstone
+The work serves merchants who need structured information beyond Shopify’s standard fields, and developers who build apps or storefronts around that information.
 
- Team: Hakeem, Ebaad, and Ann.
- Hakeem’s contribution: eight PRs; seven merged, one open.
- Adjusted changes: +3,490 / −526.
+- **Metafields** attach typed custom data to resources such as products, customers, and blog posts.
+- **Metaobjects** define reusable structured content, such as a size guide, ingredient record, or designer profile.
+- **Definitions** specify the structure and validation rules; values and entries hold the actual content.
 
- His main contributions covered:
+These features need consistent behavior across different resource pages, field types, permissions, ownership rules, and save mechanisms. Tests must distinguish successful UI interactions from successful persistence.
 
- - Login/signup screens and password validation: #18 (https://github.com/DevDegree/fed-Shopiflix-EbaaadAhmed-Annmayli-hakeem-k34/pull/18), #20
-   (https://github.com/DevDegree/fed-Shopiflix-EbaaadAhmed-Annmayli-hakeem-k34/pull/20).
- - Child/adult profiles: birthday entry, age calculation, separate content, and profile-aware GraphQL queries: #40 (https://github.com/DevDegree/fed-Shopiflix-EbaaadAhmed-Annmayli-hakeem-k34/pull/40).
- - Registration changes: extended the existing mutation with birthday/profile information and updated the client: #42
-   (https://github.com/DevDegree/fed-Shopiflix-EbaaadAhmed-Annmayli-hakeem-k34/pull/42).
- - Recommendation popup: a hook and modal that suggest a random movie or series: #33 (https://github.com/DevDegree/fed-Shopiflix-EbaaadAhmed-Annmayli-hakeem-k34/pull/33).
- - Content and visual work: course-themed series data, login fixes, and an open styling PR: #30 (https://github.com/DevDegree/fed-Shopiflix-EbaaadAhmed-Annmayli-hakeem-k34/pull/30), #34
-   (https://github.com/DevDegree/fed-Shopiflix-EbaaadAhmed-Annmayli-hakeem-k34/pull/34), #28 (https://github.com/DevDegree/fed-Shopiflix-EbaaadAhmed-Annmayli-hakeem-k34/pull/28).
+The contribution record shows priorities around modern Polaris components, consistent settings tables, responsive behavior, and reliable browser tests. **It does not establish the team’s complete roadmap, service ownership, or launch history.**
 
- This project shows work across UI, React state, GraphQL, and server logic. The team had 19 PRs overall; I counted only his eight.
+**Scale:** I found no supported merchant/store counts, request volumes, or adoption figures. Merged changes affected merchant-facing Admin code, but merge history alone does not establish deployment dates or merchant exposure. The E2E tests use synthetic test resources, not evidence of customer usage.
 
- ### 2. Stopwatch — web app, custom hooks, and mobile conversion
+### 4. Playwright coverage: counts and actual workflows
 
- The original stopwatch (https://github.com/DevDegree/fed-stopwatch-hakeem-k34/pull/1) merged. It includes elapsed time, pause/resume, laps, and a five-second challenge.
+I confirmed **one added spec file and changes to three existing spec files** across the inspected work. I did not establish a complete net-new test count across the tenure.
 
- An open follow-up (https://github.com/DevDegree/fed-stopwatch-hakeem-k34/pull/2) extracts reusable hooks and time utilities.
+| Area | What the work exercises | New versus existing |
+|---|---|---|
+| Metaobject entries | Create an entry, check its values, update it through Quick Edit, delete it, and check removal | Rewrites an existing test |
+| Blog-post definitions | Create a definition, edit its name and description, delete it, and check removal | Replaces older skipped resource coverage |
+| Blog-post values | Create test data, enter a value through the shared card, save, check it, clear it, and check the empty state | Extends coverage |
+| Customer values | Create a customer and definition; set, update, and clear a value through the customer editor | Adds coverage for another save integration |
+| Cleanup | Remove generated definitions through GraphQL and remove created resources after failures | Extends and refactors existing cleanup |
 
- ┌─────────────────────────────────────────────────────────────────────────────────────────┬──────────────────────┬──────────────────┐
- │ Submission                                                                              │ Status               │ Adjusted changes │
- ├─────────────────────────────────────────────────────────────────────────────────────────┼──────────────────────┼──────────────────┤
- │ Original web app and follow-up                                                          │ One merged, one open │ +942 / −104      │
- ├─────────────────────────────────────────────────────────────────────────────────────────┼──────────────────────┼──────────────────┤
- │ React Native/Expo conversion (https://github.com/DevDegree/fed-CYOMA-hakeem-k34/pull/1) │ Open                 │ +691 / −44       │
- ├─────────────────────────────────────────────────────────────────────────────────────────┼──────────────────────┼──────────────────┤
- │ Second web submission (https://github.com/DevDegree/fed-stopwatch-hakeem-k34-2/pull/1)  │ Open                 │ +256 / −2        │
- └─────────────────────────────────────────────────────────────────────────────────────────┴──────────────────────┴──────────────────┘
+**Important counting distinction:** the original blog-post value PR contained one test that looped through eight field types—not eight individual tests.
 
- The mobile version adds native controls, haptic feedback, a lap list, and a challenge modal. These are related iterations, not three unrelated products.
+The current local version narrows that scenario to single-line text and separates blog-post and customer integration paths. Do not claim eight currently covered types from the earlier PR alone.
 
- ### 3. Hacker News tutorial and IMDB-like app
+The earlier definition suite also lost older product/collection cases during replacement. This was not simply additive coverage.
 
- Hacker News (https://github.com/DevDegree/hacker-news-tutorial-hakeem-34/pull/1): +1,565 / −1; open.
+### 5–7. Pipeline, regressions, and reliability
 
- The tutorial submission covers React/Apollo, a Prisma/GraphQL backend, login, link creation, voting, search, subscriptions, and pagination.
+The tests integrate with **Playwright, CI, and Observe synthetic monitoring**. The metaobject rewrite explicitly removed its CI skip.
 
- IMDB-like mobile app (https://github.com/DevDegree/fed-imdb-hakeem-k34/pull/1): +589 / −12; open.
+The inspected metadata configures a run interval of 5 for the relevant synthetics. I did not check its unit or live scheduler state. I found no dependable figures for runtime, changes gated, or daily executions.
 
- It uses React Native, Apollo, and Expo routes to show movies, movie details, cast, and reviews.
+A four-minute timeout exists in the value tests. **That is a limit, not a measured duration.**
 
- The Hacker News project follows a tutorial. Its size does not establish independent backend design.
+Supported reliability changes include:
 
- ### 4. Ruby Wordle — team project with Soonwoo
+- **Quick Edit compatibility:** open the appropriate field group before entering values, rather than using an outdated interaction sequence.
+- **Selector precision:** distinguish duplicate create actions and clear buttons; accept redirected URLs with query strings.
+- **GraphQL cleanup:** remove generated resources without dependence on brittle settings-page interactions.
+- **Failure reporting:** attempt cleanup after failures and retain both the original failure and cleanup errors.
+- **CI metadata fallback:** check the reported PR against its branch and commit, then resolve an alternative when metadata is stale.
 
- Three authored PRs: two merged, one open. Adjusted changes: +485 / −35.
+I found **no measured flake-rate reduction, CI-time improvement, or confirmed count of pre-release regressions caught**. The PR history also records a test-environment mismatch, not a demonstrated production GraphQL defect.
 
- ┌───────────────────────────────────────────────────────────────────────┬────────────────────────────────────────────────────────┬────────┐
- │ PR                                                                    │ Contribution                                           │ Status │
- ├───────────────────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────┼────────┤
- │ #8 (https://github.com/DevDegree/ruby-wordle-soonwoo-hakeem/pull/8)   │ Welcome menu, instructions, and menu-input validation  │ Merged │
- ├───────────────────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────┼────────┤
- │ #10 (https://github.com/DevDegree/ruby-wordle-soonwoo-hakeem/pull/10) │ Board, guess-input validation, and game-loop structure │ Merged │
- ├───────────────────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────┼────────┤
- │ #20 (https://github.com/DevDegree/ruby-wordle-soonwoo-hakeem/pull/20) │ Difficulty levels, variable word lengths, and timers   │ Open   │
- └───────────────────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────┴────────┘
+### 8. Polaris migration
 
- I count the timer/difficulty work as a proposed extension, not completed merged functionality.
+Across **five merged migration PRs**, the diffs remove **14 LegacyText instances from 11 component implementation files**.
 
- ### 5. Weather CLI — capstone with you and Dasha
+This was a **React component API migration**, not evidence of a broad Web Components migration.
 
- The team app supports weather lookup, forecasts, city comparison, settings, and saved data.
+The newer architecture separates responsibilities:
 
- Hakeem authored two of the team’s 21 PRs:
+- Text and Paragraph handle typography.
+- Layout primitives handle alignment and spacing.
+- Wrapping components handle long content.
+- Semantic heading elements preserve accessibility.
 
- ┌─────────────────────────────────────────────────────────────────────────────┬───────────────────────────────────────────────────────┬──────────────────┬───────────┐
- │ PR                                                                          │ Contribution                                          │ Status           │ Changes   │
- ├─────────────────────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┼──────────────────┼───────────┤
- │ #14 (https://github.com/DevDegree/jackson-dasha-hakeem-weather-app/pull/14) │ City constructor/setter validation and output changes │ Merged           │ +89 / −44 │
- ├─────────────────────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┼──────────────────┼───────────┤
- │ #4 (https://github.com/DevDegree/jackson-dasha-hakeem-weather-app/pull/4)   │ Earlier City-class implementation                     │ Closed, unmerged │ +91 / −0  │
- └─────────────────────────────────────────────────────────────────────────────┴───────────────────────────────────────────────────────┴──────────────────┴───────────┘
+The changes preserve subdued styling, tabular numbers, wrapping, and alignment while removing deprecated APIs and lint suppressions.
 
- His merged changes validate names, temperatures, humidity, wind speed, UV, and precipitation.
+One review caught a subtle distinction: centering a component does not necessarily center its wrapped text. The final approach addressed narrow-screen text alignment.
 
- Other coursework
+A deprecated surface remained outside the migration after review. Do not describe the work as “migrated all metafields components.”
 
- The full report gives individual links and counts for these projects.
+### 9. Other merchant-facing work
 
- ┌──────────────────────────────┬─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
- │ Area                         │ Work found                                                                                                                                                  │
- ├──────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
- │ TypeScript foundations       │ Cassette player, ASCII art, penny-jar simulation, Cashmoney, object-oriented exercises, Textogram, and PR workshops                                         │
- ├──────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
- │ React interfaces             │ Portfolio, Dan’s Hats, chessboard, DC Heroes timeline, and Taylorgram                                                                                       │
- ├──────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
- │ React state and interactions │ Hooks exercises, grocery/coupon calculator, trivia game, and CSS animations                                                                                 │
- ├──────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
- │ Mobile/API exercises         │ Wikipedia search, Expo StickerSmash, and team Cerebro work                                                                                                  │
- ├──────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
- │ Ruby/Rails/SQL               │ Treasure Tracker, Bubble Tea Shop, Hangman, movie theatre, SQL CRUD, models/migrations, validations, associations, baseball statistics, and Pokémon queries │
- └──────────────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+| Change | Problem, approach, and result |
+|---|---|
+| App-controlled metafields table | Replaced a custom grid with shared settings-table components; simplified rows and removed a doubled border. |
+| App-controlled metaobjects table | Adopted the same table pattern while preserving app ownership information; shared the attribution cell across surfaces. |
+| Definition-name truncation | Kept long names within rows while preserving full-name access, row navigation, warning styling, and focus behavior. |
+| Responsive metaobject actions | Kept the primary create action visible on small screens as an icon button; removed navigation targets from disabled actions. |
 
- The timeline work deserves particular attention: it progresses from a merged static feed to open submissions with likes, new posts, and shared React state.
+Local commit history confirms the responsive-action and later E2E work reached the checked-out history, despite GitHub mirror PRs showing no merge.
 
- Why the raw line count is misleading
+I found no supported production data-model or GraphQL schema change attributable to him.
 
- GitHub reports 3,160,159 raw changed lines across his 69 PRs. Most are dependencies, not coursework code.
+### 10–14. Reviews, measurements, collaboration, stack, and other work
 
- For example, the ActiveRecord practice PR adds 2,951,551 lines because it includes vendored Ruby gems. After exclusions, its diff is +183 / −43.
+**Production reviews:** the accessible GitHub search returned no matching reviews of others’ PRs. That is not proof of zero reviews; Meteorite coverage remains incomplete.
 
- Three React Hooks PRs also share the exact same base and head commits. They count as three PRs, but their shared diff counts once.
+**Supported measurements:** 14 migrated text instances, 11 component files, five migration PRs, and the specific coverage changes above. Manual QA hours, defect escape rate, and coverage percentages remain unknown.
 
- The adjusted 19,191 figure measures cumulative PR changes—not unique code, manually typed code, or productivity. Related submissions can still contain overlapping work.
+**Collaboration:** the work spans multiple Admin surfaces and shared CI scripts within shop/world. Review feedback influenced implementation and scope. This does not establish membership on multiple teams.
 
- Coverage limits
+**Observed stack:** React, TypeScript, Polaris, CSS modules, GraphQL, Playwright, Jest/component tests, Node.js scripts, pnpm, Oxlint, Buildkite, GitHub APIs, and Observe. These show tools touched, not ownership of the deployment platform.
 
- 82 repositories does not mean 82 completed projects. The inventory contains starter copies, duplicate submissions, team exercises, and empty repositories.
+**Outside shop/world and DevDegree, August 2025–May 2026:** no attributable Hack Days, internal-tool, documentation, or onboarding contribution surfaced in this investigation.
+
+## Part B — Shopiflix
+
+### 15–17. Product, stack, and architecture
+
+Shopiflix is a **streaming-style catalog and watchlist prototype**, not a demonstrated video-streaming service.
+
+Users can browse movies and series, search titles, inspect details and episodes, register or select an account, and add or remove watchlist items. It also includes profile-based catalog filtering and a recommendation popup.
+
+| Layer | Inspected implementation |
+|---|---|
+| Client | React Native, Expo, TypeScript, Expo Router |
+| State and data | React hooks, Context, Apollo Client and its cache |
+| API | Node.js, Express, Apollo Server, GraphQL resolvers |
+| Persistence | A local JSON file—not a relational database |
+| Styling and tooling | React Native StyleSheet, Expo tooling, Babel, TypeScript; Jest/Expo test configuration |
+
+The client separates screens, reusable components, GraphQL operations, custom hooks, and TypeScript models.
+
+The backend models movies, series, episodes, users, and watchlist items. Resolvers connect episodes to series and resolve watchlist references into movies or series. Mutations update registration, the current user, watchlists, and ratings.
+
+Apollo uses a composite cache key for watchlist items because a movie and a series can share an identifier. **That cache fix belongs to teammates’ documented work, not Hakeem’s sole contribution.**
+
+### Important limits
+
+- **Authentication is a prototype:** the client compares credentials, passwords exist in plaintext, and the server stores one shared current-user identifier.
+- **Profile filtering is not a security boundary:** clients supply profile arguments, and filtering is not uniform across all resolvers.
+- **Recommendations are random, not personalized or AI-based.** The current timer-reset function is empty, so “inactivity detection” overstates the implementation.
+- The repository contains Jest configuration, but I found no committed test files in the inspected tree.
+- I found no deployment configuration or evidence of an App Store release. Video playback also remains unsupported.
+
+### 18–19. Team output and process
+
+The inspected repository contains:
+
+- **66 tracked files**, including assets and configuration.
+- **60 commits reachable from main**, including merges and repeated integration history.
+- **19 PRs**, of which **18 merged**.
+- **Eight Hakeem-authored PRs**, of which **seven merged**.
+
+These are repository counts, not counts of distinct features or Hakeem-authored source changes.
+
+The assignment required issue-linked branches, a project board, peer review, and individual reflections. PR records demonstrate branches, reviews, merges, and integration-conflict resolution. They do not establish sprint cadence or complete board compliance.
+
+Hakeem approved the final integration PR. I found **one formal review by him in this repository**, with no written feedback in its body.
+
+### 20. Hakeem’s supported contributions
+
+**Registration and forms:** login/sign-up views, password requirements and feedback, password confirmation, birthday input, validation errors, and styling.
+
+**Client-to-server registration:** GraphQL operation, custom hook, form integration, backend registration changes, persistence, and age-based profile assignment.
+
+**Recommendation UI:** timed random selection, popup presentation, dismissal, and navigation to a detail screen.
+
+**Content:** training-themed series and episode data.
+
+The password field work addressed a reported state-loss problem when visibility changed. He implemented manual masking that kept the real password separately. That supports a UI state-management claim, not a secure-authentication claim.
+
+Login and registration also received substantial teammate contributions. Avoid claiming sole ownership of the complete authentication flow.
+
+### 21–22. Dates and evaluation
+
+- Repository history begins **December 8, 2025**.
+- Hakeem’s first inspected substantive commit dates to **December 13, 2025**.
+- His latest inspected feature work and the final integration date to **December 19, 2025**.
+- **December 2025** is a supported project date.
+
+The README establishes a structured group assignment with technical requirements, peer review, and reflection. I found no grade, evaluation result, award, or recognition.
+
+## Part C — Other training projects
+
+**Strongest selection: Shopiflix, the weather CLI, and—if a third project is needed—the Ruby Wordle project.**
+
+| Project | Supported scope and stack | Dates and limits |
+|---|---|---|
+| **Weather CLI** | Three-person TypeScript application; WeatherAPI integration, current conditions, forecasts, city comparisons, unit conversion, JSON profiles, and separate model/API/UI layers. Jest tests exist. | Repository activity: October 6–10, 2025. README reports 100 tests across five suites; I did not run them or attribute them individually. Strongest additional candidate. |
+| **Ruby Wordle** | Paired Ruby terminal game; game entry point, pre-game flow, word-selection files, dictionary data, and terminal-color libraries. | Repository activity: January 19–23, 2026. Assignment-driven project; completion and Hakeem’s precise share need closer inspection. |
+| **Rails store** | Repository identified, but content access failed under organization SSO restrictions. | Repository metadata spans January–March 2026. Stack details, features, tutorial status, and completion remain unconfirmed. |
+| **Mobile adaptation, timeline, and chess exercises** | Training repositories and assignment material surfaced. The mobile assignment asks students to port an earlier React project to React Native. | November–December 2025 records. Insufficient implementation evidence to recommend separate resume entries. |
+| **Coin-change calculator** | Individual TypeScript exercise with a greedy algorithm, Canadian coin rounding, command-line input, and Jest scaffolding. | September–October 2025 metadata. Explicitly scaffolded coursework; weaker than the capstones. |
+
+Expo and Hacker News tutorial repositories also surfaced. Label those as tutorials, not independently designed applications.
+
+This is **not an exhaustive inventory**: organization search and some repository reads encountered SSO restrictions. Repository creation and last-push dates do not prove completion dates.
+
+### Evidence boundary
+
+The findings use authored PRs and diffs, local shop/world history, and Shopiflix source, commits, and reviews. No applications or tests ran.
+
+**Before using the employment heading, ask Hakeem to distinguish his overall Shopify employment dates from his production-team placement dates.**
 
