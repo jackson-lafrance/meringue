@@ -16,12 +16,15 @@ module Meringue
           )
         end
 
-        rejected_dirty = false
+        # A detached checkout has no branch to record and revalidate against, so it is skipped;
+        # every other registered, unlocked, non-bare, readable checkout is a candidate whatever
+        # branch it is on. Ranking runs before the cleanliness check because `git status` is the
+        # expensive step on a large repository and the first clean candidate in rank order wins.
         candidates = parse_worktree_records(listed.fetch("stdout")).filter_map do |record|
           next if record.key?("bare") || record.key?("locked") || record.key?("prunable")
 
           branch_ref = record.fetch("branch", nil)
-          next unless %w[refs/heads/main refs/heads/master].include?(branch_ref)
+          next unless branch_ref.to_s.start_with?("refs/heads/")
 
           checkout_root = present_output(record.fetch("worktree", nil))
           next unless checkout_root
@@ -31,43 +34,98 @@ module Meringue
           next unless Dir.exist?(workspace_path) && File.readable?(workspace_path)
           next if bare_repository?(checkout_root)
 
-          clean = shared_checkout_clean?(checkout_root)
+          branch = branch_ref.delete_prefix("refs/heads/")
+          {
+            "checkout_root" => checkout_root,
+            "branch" => branch,
+            "head" => present_output(record.fetch("HEAD", nil)),
+            "managed" => managed_shared_checkout_owner_matches?(
+              read_workspace_owner(checkout_root),
+              project_root: project_path,
+              git_root: git_root,
+              branch: branch,
+              worktree_root: checkout_root
+            )
+          }
+        end
+
+        rejected_dirty = false
+        rank_shared_checkout_candidates(candidates, git_root).each do |candidate|
+          clean = shared_checkout_clean?(candidate.fetch("checkout_root"))
           unless clean.fetch("usable", false)
             rejected_dirty ||= clean.fetch("reason", nil) == "shared_checkout_dirty"
             next
           end
 
-          branch = branch_ref.sub(%r{\Arefs/heads/}, "")
-          managed = managed_shared_checkout_owner_matches?(
-            read_workspace_owner(checkout_root),
-            project_root: project_path,
-            git_root: git_root,
-            branch: branch,
-            worktree_root: checkout_root
-          )
-          shared_checkout_record(
+          return shared_checkout_record(
             project_path: project_path,
             git_root: git_root,
             relative_project_path: relative_project_path,
-            checkout_root: checkout_root,
-            branch: branch,
-            managed: managed,
-            created: false
+            checkout_root: candidate.fetch("checkout_root"),
+            branch: candidate.fetch("branch"),
+            managed: candidate.fetch("managed"),
+            created: false,
+            selection: candidate.fetch("selection")
           )
         end
-        preferred = candidates.find { |candidate| candidate.fetch("managed_shared_checkout", false) } ||
-                    candidates.find { |candidate| same_path?(candidate.fetch("workspace_root_path"), git_root) } ||
-                    candidates.first
-        return preferred if preferred
 
         reason = if rejected_dirty
                    "shared_checkout_dirty"
                  elsif repository.fetch("bare")
-                   "bare_repository_has_no_shared_main_checkout"
+                   "bare_repository_has_no_shared_checkout"
                  else
-                   "no_readable_main_checkout"
+                   "no_readable_checkout"
                  end
         reuse_outcome(false, reason, git_root: git_root)
+      end
+
+      # Order candidates best first: SHARED_CHECKOUT_SELECTION_ORDER, then the manager-owned
+      # cache, then the registered project checkout itself, then the newest commit, then path.
+      # The rank is computed from `git worktree list` output plus one ancestry query and one
+      # commit-date query per candidate, both O(1)-ish with a commit graph, so ranking every
+      # checkout of a large repository stays cheap next to a single `git status`.
+      def rank_shared_checkout_candidates(candidates, git_root)
+        return [] if candidates.empty?
+
+        mainline_ref = shared_checkout_mainline_ref(git_root)
+        candidates.map do |candidate|
+          head = candidate.fetch("head")
+          selection = if %w[main master].include?(candidate.fetch("branch"))
+                        SHARED_CHECKOUT_MAIN_BRANCH
+                      elsif mainline_ref && head && commit_reachable_from?(git_root, head, mainline_ref)
+                        SHARED_CHECKOUT_MAINLINE_SNAPSHOT
+                      else
+                        SHARED_CHECKOUT_OTHER_BRANCH
+                      end
+          candidate.merge("selection" => selection, "committed_at" => head ? commit_time(git_root, head) : 0)
+        end.sort_by do |candidate|
+          [
+            SHARED_CHECKOUT_SELECTION_ORDER.index(candidate.fetch("selection")),
+            candidate.fetch("managed") ? 0 : 1,
+            same_path?(candidate.fetch("checkout_root"), git_root) ? 0 : 1,
+            -candidate.fetch("committed_at"),
+            candidate.fetch("checkout_root")
+          ]
+        end
+      end
+
+      # The ref that defines "on mainline" for ranking. Unlike preferred_base_ref this never falls
+      # back to HEAD: with no main/master anywhere, no checkout can claim to be a mainline snapshot.
+      def shared_checkout_mainline_ref(git_root)
+        %w[origin/main origin/master main master].find do |ref|
+          run_command("git", "-C", git_root, "rev-parse", "--verify", "--quiet", "#{ref}^{commit}").fetch("status").success?
+        end
+      end
+
+      def commit_reachable_from?(git_root, commit, ref)
+        run_command("git", "-C", git_root, "merge-base", "--is-ancestor", commit, ref).fetch("status").success?
+      end
+
+      def commit_time(git_root, commit)
+        result = run_command("git", "-C", git_root, "log", "-1", "--format=%ct", commit)
+        return 0 unless result.fetch("status").success?
+
+        result.fetch("stdout").to_s.strip.to_i
       end
 
       def provision_managed_shared_read_only_checkout(project_path, repository)
@@ -249,7 +307,8 @@ module Meringue
         }
       end
 
-      def shared_checkout_record(project_path:, git_root:, relative_project_path:, checkout_root:, branch:, managed:, created:)
+      def shared_checkout_record(project_path:, git_root:, relative_project_path:, checkout_root:, branch:, managed:, created:,
+                                 selection: SHARED_CHECKOUT_MAIN_BRANCH)
         workspace_path = relative_project_path == "." ? checkout_root : File.join(checkout_root, relative_project_path)
         {
           "strategy" => "shared_checkout",
@@ -263,6 +322,7 @@ module Meringue
           "project_relative_path" => relative_project_path,
           "created" => created,
           "managed_shared_checkout" => managed,
+          "shared_checkout_selection" => selection,
           "read_only" => true,
           "errors" => []
         }

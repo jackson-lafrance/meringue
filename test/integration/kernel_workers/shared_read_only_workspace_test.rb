@@ -82,6 +82,31 @@ class KernelWorkersSharedReadOnlyWorkspaceTest < Minitest::Test
     assert_equal 0, manager.allocation_attempts
   end
 
+  def test_project_checkout_on_a_feature_branch_is_shared_and_the_branch_is_named_to_the_user
+    root = create_git_repo("branch-checkout")
+    run_git(root, "switch", "-c", "feature")
+    File.write(File.join(root, "feature.txt"), "feature work\n")
+    run_git(root, "add", ".")
+    run_git(root, "commit", "-m", "feature commit")
+    manager = AllocationRejectingManager.new(root_path: workspace_root)
+    engine = build_engine(workspace_manager: manager)
+    project_id = add_project(engine, root, name: "Branch checkout")
+    issue_id = create_issue(engine, project_id, title: "Inspect the branch")
+
+    result = spawn_worker(engine, issue_id, workspace_mode: "shared_read_only")
+    worker = agent(engine, result.fetch("target_id"))
+
+    assert_equal 0, manager.allocation_attempts
+    assert_equal File.realpath(root), File.realpath(worker.fetch("workspace_path"))
+    assert_equal "shared_checkout", worker.fetch("workspace_strategy")
+    assert_equal "feature", worker.fetch("workspace_branch")
+    assert_equal "shared_read_only", worker.fetch("effective_workspace_mode")
+    assert_nil worker.fetch("workspace_mode_fallback_reason")
+    assert_equal "other_branch", worker.dig("harness_metadata", "workspace_plan", "shared_checkout_selection")
+    assert_includes worker.dig("harness_metadata", "workspace_note"), "validated shared checkout on branch feature, which carries commits that are not on main"
+    assert_includes result.fetch("message"), "Using a validated shared read-only checkout on branch feature (no clean main checkout was available)."
+  end
+
   def test_bare_registered_root_uses_existing_linked_main_checkout_without_provisioning
     source = create_git_repo
     bare = tmp_path("world-linked.git")

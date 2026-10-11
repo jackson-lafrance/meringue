@@ -1,0 +1,208 @@
+**The strongest supported claims are Polaris modernization, Playwright coverage and reliability, and full-stack contributions to Shopiflix.**
+
+Your employment dates remain user-supplied. The records show training projects from September 2025 through March 2026, and production contributions from May through September 2026. They do not support “completed the training path before August 2025.”
+
+## Resume bullets
+
+### Shopify
+- Migrated 14 deprecated Polaris text instances across 11 React components, preserving typography, accessible headings, numeric alignment, and responsive layouts.
+- Extended Playwright coverage for metafield definitions, blog-post and customer values, and metaobject entries, with GraphQL setup and failure-safe cleanup.
+- Restored CI coverage for metaobject entry creation, editing, and deletion by updating tests for Quick Edit and removing an existing CI skip.
+- Hardened test infrastructure through scoped cleanup, precise UI selectors, and a fallback for stale pull-request metadata in production validation.
+- Modernized metafield and metaobject tables with shared components, and fixed long-name truncation while preserving navigation and focus behavior.
+
+### Shopiflix
+- Built registration and age-based profile features across a React Native client and Node.js GraphQL backend for a three-person media-catalog capstone.
+- Implemented password validation, confirmation fields, birthday selection, and persistent registration through typed GraphQL operations and custom React hooks.
+- Created a recommendation popup with timed suggestions and navigation to title details; contributed seven merged pull requests.
+
+These bullets avoid unsupported merchant counts, performance gains, deployment claims, and sole ownership.
+
+## Part A — Shopify production work
+
+### 1–3. Team scope, scale, and product context
+
+**Supported surfaces:** Settings → Custom data; metafield definition forms and tables; metaobject definition lists; app-controlled definitions; metaobject entries; shared metafield editors within resource pages.
+
+The work serves merchants who need structured information beyond Shopify’s standard fields, and developers who build apps or storefronts around that information.
+
+- **Metafields** attach typed custom data to resources such as products, customers, and blog posts.
+- **Metaobjects** define reusable structured content, such as a size guide, ingredient record, or designer profile.
+- **Definitions** specify the structure and validation rules; values and entries hold the actual content.
+
+These features need consistent behavior across different resource pages, field types, permissions, ownership rules, and save mechanisms. Tests must distinguish successful UI interactions from successful persistence.
+
+The contribution record shows priorities around modern Polaris components, consistent settings tables, responsive behavior, and reliable browser tests. **It does not establish the team’s complete roadmap, service ownership, or launch history.**
+
+**Scale:** I found no supported merchant/store counts, request volumes, or adoption figures. Merged changes affected merchant-facing Admin code, but merge history alone does not establish deployment dates or merchant exposure. The E2E tests use synthetic test resources, not evidence of customer usage.
+
+### 4. Playwright coverage: counts and actual workflows
+
+I confirmed **one added spec file and changes to three existing spec files** across the inspected work. I did not establish a complete net-new test count across the tenure.
+
+| Area | What the work exercises | New versus existing |
+|---|---|---|
+| Metaobject entries | Create an entry, check its values, update it through Quick Edit, delete it, and check removal | Rewrites an existing test |
+| Blog-post definitions | Create a definition, edit its name and description, delete it, and check removal | Replaces older skipped resource coverage |
+| Blog-post values | Create test data, enter a value through the shared card, save, check it, clear it, and check the empty state | Extends coverage |
+| Customer values | Create a customer and definition; set, update, and clear a value through the customer editor | Adds coverage for another save integration |
+| Cleanup | Remove generated definitions through GraphQL and remove created resources after failures | Extends and refactors existing cleanup |
+
+**Important counting distinction:** the original blog-post value PR contained one test that looped through eight field types—not eight individual tests.
+
+The current local version narrows that scenario to single-line text and separates blog-post and customer integration paths. Do not claim eight currently covered types from the earlier PR alone.
+
+The earlier definition suite also lost older product/collection cases during replacement. This was not simply additive coverage.
+
+### 5–7. Pipeline, regressions, and reliability
+
+The tests integrate with **Playwright, CI, and Observe synthetic monitoring**. The metaobject rewrite explicitly removed its CI skip.
+
+The inspected metadata configures a run interval of 5 for the relevant synthetics. I did not check its unit or live scheduler state. I found no dependable figures for runtime, changes gated, or daily executions.
+
+A four-minute timeout exists in the value tests. **That is a limit, not a measured duration.**
+
+Supported reliability changes include:
+
+- **Quick Edit compatibility:** open the appropriate field group before entering values, rather than using an outdated interaction sequence.
+- **Selector precision:** distinguish duplicate create actions and clear buttons; accept redirected URLs with query strings.
+- **GraphQL cleanup:** remove generated resources without dependence on brittle settings-page interactions.
+- **Failure reporting:** attempt cleanup after failures and retain both the original failure and cleanup errors.
+- **CI metadata fallback:** check the reported PR against its branch and commit, then resolve an alternative when metadata is stale.
+
+I found **no measured flake-rate reduction, CI-time improvement, or confirmed count of pre-release regressions caught**. The PR history also records a test-environment mismatch, not a demonstrated production GraphQL defect.
+
+### 8. Polaris migration
+
+Across **five merged migration PRs**, the diffs remove **14 LegacyText instances from 11 component implementation files**.
+
+This was a **React component API migration**, not evidence of a broad Web Components migration.
+
+The newer architecture separates responsibilities:
+
+- Text and Paragraph handle typography.
+- Layout primitives handle alignment and spacing.
+- Wrapping components handle long content.
+- Semantic heading elements preserve accessibility.
+
+The changes preserve subdued styling, tabular numbers, wrapping, and alignment while removing deprecated APIs and lint suppressions.
+
+One review caught a subtle distinction: centering a component does not necessarily center its wrapped text. The final approach addressed narrow-screen text alignment.
+
+A deprecated surface remained outside the migration after review. Do not describe the work as “migrated all metafields components.”
+
+### 9. Other merchant-facing work
+
+| Change | Problem, approach, and result |
+|---|---|
+| App-controlled metafields table | Replaced a custom grid with shared settings-table components; simplified rows and removed a doubled border. |
+| App-controlled metaobjects table | Adopted the same table pattern while preserving app ownership information; shared the attribution cell across surfaces. |
+| Definition-name truncation | Kept long names within rows while preserving full-name access, row navigation, warning styling, and focus behavior. |
+| Responsive metaobject actions | Kept the primary create action visible on small screens as an icon button; removed navigation targets from disabled actions. |
+
+Local commit history confirms the responsive-action and later E2E work reached the checked-out history, despite GitHub mirror PRs showing no merge.
+
+I found no supported production data-model or GraphQL schema change attributable to him.
+
+### 10–14. Reviews, measurements, collaboration, stack, and other work
+
+**Production reviews:** the accessible GitHub search returned no matching reviews of others’ PRs. That is not proof of zero reviews; Meteorite coverage remains incomplete.
+
+**Supported measurements:** 14 migrated text instances, 11 component files, five migration PRs, and the specific coverage changes above. Manual QA hours, defect escape rate, and coverage percentages remain unknown.
+
+**Collaboration:** the work spans multiple Admin surfaces and shared CI scripts within shop/world. Review feedback influenced implementation and scope. This does not establish membership on multiple teams.
+
+**Observed stack:** React, TypeScript, Polaris, CSS modules, GraphQL, Playwright, Jest/component tests, Node.js scripts, pnpm, Oxlint, Buildkite, GitHub APIs, and Observe. These show tools touched, not ownership of the deployment platform.
+
+**Outside shop/world and DevDegree, August 2025–May 2026:** no attributable Hack Days, internal-tool, documentation, or onboarding contribution surfaced in this investigation.
+
+## Part B — Shopiflix
+
+### 15–17. Product, stack, and architecture
+
+Shopiflix is a **streaming-style catalog and watchlist prototype**, not a demonstrated video-streaming service.
+
+Users can browse movies and series, search titles, inspect details and episodes, register or select an account, and add or remove watchlist items. It also includes profile-based catalog filtering and a recommendation popup.
+
+| Layer | Inspected implementation |
+|---|---|
+| Client | React Native, Expo, TypeScript, Expo Router |
+| State and data | React hooks, Context, Apollo Client and its cache |
+| API | Node.js, Express, Apollo Server, GraphQL resolvers |
+| Persistence | A local JSON file—not a relational database |
+| Styling and tooling | React Native StyleSheet, Expo tooling, Babel, TypeScript; Jest/Expo test configuration |
+
+The client separates screens, reusable components, GraphQL operations, custom hooks, and TypeScript models.
+
+The backend models movies, series, episodes, users, and watchlist items. Resolvers connect episodes to series and resolve watchlist references into movies or series. Mutations update registration, the current user, watchlists, and ratings.
+
+Apollo uses a composite cache key for watchlist items because a movie and a series can share an identifier. **That cache fix belongs to teammates’ documented work, not Hakeem’s sole contribution.**
+
+### Important limits
+
+- **Authentication is a prototype:** the client compares credentials, passwords exist in plaintext, and the server stores one shared current-user identifier.
+- **Profile filtering is not a security boundary:** clients supply profile arguments, and filtering is not uniform across all resolvers.
+- **Recommendations are random, not personalized or AI-based.** The current timer-reset function is empty, so “inactivity detection” overstates the implementation.
+- The repository contains Jest configuration, but I found no committed test files in the inspected tree.
+- I found no deployment configuration or evidence of an App Store release. Video playback also remains unsupported.
+
+### 18–19. Team output and process
+
+The inspected repository contains:
+
+- **66 tracked files**, including assets and configuration.
+- **60 commits reachable from main**, including merges and repeated integration history.
+- **19 PRs**, of which **18 merged**.
+- **Eight Hakeem-authored PRs**, of which **seven merged**.
+
+These are repository counts, not counts of distinct features or Hakeem-authored source changes.
+
+The assignment required issue-linked branches, a project board, peer review, and individual reflections. PR records demonstrate branches, reviews, merges, and integration-conflict resolution. They do not establish sprint cadence or complete board compliance.
+
+Hakeem approved the final integration PR. I found **one formal review by him in this repository**, with no written feedback in its body.
+
+### 20. Hakeem’s supported contributions
+
+**Registration and forms:** login/sign-up views, password requirements and feedback, password confirmation, birthday input, validation errors, and styling.
+
+**Client-to-server registration:** GraphQL operation, custom hook, form integration, backend registration changes, persistence, and age-based profile assignment.
+
+**Recommendation UI:** timed random selection, popup presentation, dismissal, and navigation to a detail screen.
+
+**Content:** training-themed series and episode data.
+
+The password field work addressed a reported state-loss problem when visibility changed. He implemented manual masking that kept the real password separately. That supports a UI state-management claim, not a secure-authentication claim.
+
+Login and registration also received substantial teammate contributions. Avoid claiming sole ownership of the complete authentication flow.
+
+### 21–22. Dates and evaluation
+
+- Repository history begins **December 8, 2025**.
+- Hakeem’s first inspected substantive commit dates to **December 13, 2025**.
+- His latest inspected feature work and the final integration date to **December 19, 2025**.
+- **December 2025** is a supported project date.
+
+The README establishes a structured group assignment with technical requirements, peer review, and reflection. I found no grade, evaluation result, award, or recognition.
+
+## Part C — Other training projects
+
+**Strongest selection: Shopiflix, the weather CLI, and—if a third project is needed—the Ruby Wordle project.**
+
+| Project | Supported scope and stack | Dates and limits |
+|---|---|---|
+| **Weather CLI** | Three-person TypeScript application; WeatherAPI integration, current conditions, forecasts, city comparisons, unit conversion, JSON profiles, and separate model/API/UI layers. Jest tests exist. | Repository activity: October 6–10, 2025. README reports 100 tests across five suites; I did not run them or attribute them individually. Strongest additional candidate. |
+| **Ruby Wordle** | Paired Ruby terminal game; game entry point, pre-game flow, word-selection files, dictionary data, and terminal-color libraries. | Repository activity: January 19–23, 2026. Assignment-driven project; completion and Hakeem’s precise share need closer inspection. |
+| **Rails store** | Repository identified, but content access failed under organization SSO restrictions. | Repository metadata spans January–March 2026. Stack details, features, tutorial status, and completion remain unconfirmed. |
+| **Mobile adaptation, timeline, and chess exercises** | Training repositories and assignment material surfaced. The mobile assignment asks students to port an earlier React project to React Native. | November–December 2025 records. Insufficient implementation evidence to recommend separate resume entries. |
+| **Coin-change calculator** | Individual TypeScript exercise with a greedy algorithm, Canadian coin rounding, command-line input, and Jest scaffolding. | September–October 2025 metadata. Explicitly scaffolded coursework; weaker than the capstones. |
+
+Expo and Hacker News tutorial repositories also surfaced. Label those as tutorials, not independently designed applications.
+
+This is **not an exhaustive inventory**: organization search and some repository reads encountered SSO restrictions. Repository creation and last-push dates do not prove completion dates.
+
+### Evidence boundary
+
+The findings use authored PRs and diffs, local shop/world history, and Shopiflix source, commits, and reviews. No applications or tests ran.
+
+**Before using the employment heading, ask Hakeem to distinguish his overall Shopify employment dates from his production-team placement dates.**
+
